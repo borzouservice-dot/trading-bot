@@ -65,7 +65,7 @@ def rsi(values, period=14):
 # 🎯 تولید سیگنال
 # =========================
 def generate_signal(price):
-    prices = [price] * 25
+    print("RSI:", r)
     r = rsi(prices).iloc[-1]
 
     if r < 30:
