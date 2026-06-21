@@ -2,15 +2,36 @@ import os
 import asyncio
 import requests
 import pandas as pd
+from flask import Flask
 from telegram import Bot
+import threading
 
+# =========================
+# 🔐 تنظیمات تلگرام
+# =========================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 bot = Bot(token=TOKEN)
 
+# =========================
+# 🌐 Flask برای Render (حل مشکل port)
+# =========================
+app = Flask(__name__)
 
-# 💰 قیمت بیتکوین
+@app.route("/")
+def home():
+    return "Bot is running"
+
+
+def run_web():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
+
+
+# =========================
+# 💰 گرفتن قیمت Bitcoin
+# =========================
 def get_price():
     try:
         url = "https://api.coingecko.com/api/v3/simple/price"
@@ -21,7 +42,9 @@ def get_price():
         return None
 
 
-# 📊 RSI ساده (با داده مصنوعی سبک ولی پایدار)
+# =========================
+# 📊 RSI ساده
+# =========================
 def rsi(values, period=14):
     df = pd.DataFrame(values, columns=["c"])
 
@@ -33,22 +56,26 @@ def rsi(values, period=14):
     return 100 - (100 / (1 + rs))
 
 
-# 🎯 سیگنال
+# =========================
+# 🎯 تولید سیگنال
+# =========================
 def generate_signal(price):
     prices = [price] * 25
     r = rsi(prices).iloc[-1]
 
     if r < 30:
-        return f"🟢 BUY SIGNAL\nBTC: {price}\nRSI: {r:.2f}"
+        return f"🟢 BUY SIGNAL\n💰 BTC: {price}\n📊 RSI: {r:.2f}"
 
     if r > 70:
-        return f"🔴 SELL SIGNAL\nBTC: {price}\nRSI: {r:.2f}"
+        return f"🔴 SELL SIGNAL\n💰 BTC: {price}\n📊 RSI: {r:.2f}"
 
     return None
 
 
-# 🔁 loop پایدار
-async def run():
+# =========================
+# 🔁 حلقه اصلی ربات
+# =========================
+async def run_bot():
     while True:
         try:
             price = get_price()
@@ -61,8 +88,6 @@ async def run():
 
         except Exception as e:
             print("Loop error:", e)
-
-            # جلوگیری از crash کامل
             try:
                 await bot.send_message(chat_id=CHAT_ID, text=f"⚠️ Error: {e}")
             except:
@@ -71,6 +96,14 @@ async def run():
         await asyncio.sleep(60)  # هر 1 دقیقه
 
 
+# =========================
+# 🚀 اجرای همزمان Flask + Bot
+# =========================
 if __name__ == "__main__":
     print("Bot started...")
-    asyncio.run(run())
+
+    # اجرای وب‌سرور برای Render
+    threading.Thread(target=run_web).start()
+
+    # اجرای ربات
+    asyncio.run(run_bot())
