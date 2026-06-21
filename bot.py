@@ -2,35 +2,38 @@ import os
 import asyncio
 import requests
 import pandas as pd
+from flask import Flask
 from telegram import Bot
+import threading
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 bot = Bot(token=TOKEN)
 
+app = Flask(__name__)
 
-# 💰 گرفتن قیمت از CoinGecko (بدون محدودیت)
+
+# 🌐 برای Render (حتماً لازم است)
+@app.route("/")
+def home():
+    return "Bot is running"
+
+
+# 💰 قیمت بیتکوین
 def get_price():
     url = "https://api.coingecko.com/api/v3/simple/price"
-    params = {
-        "ids": "bitcoin",
-        "vs_currencies": "usd"
-    }
-    data = requests.get(url).json()
-    return data["bitcoin"]["usd"]
+    r = requests.get(url).json()
+    return r["bitcoin"]["usd"]
 
 
-# 📊 ساخت دیتا ساده برای RSI
-def fake_ohlcv(price):
-    return pd.DataFrame([price] * 20, columns=["c"])
+# 📊 RSI ساده
+def rsi(values, period=14):
+    df = pd.DataFrame(values, columns=["c"])
+    delta = df["c"].diff()
 
-
-def rsi(series, period=14):
-    delta = series.diff()
-
-    gain = (delta.where(delta > 0, 0)).rolling(period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(period).mean()
+    gain = delta.where(delta > 0, 0).rolling(period).mean()
+    loss = -delta.where(delta < 0, 0).rolling(period).mean()
 
     rs = gain / loss
     return 100 - (100 / (1 + rs))
@@ -40,22 +43,20 @@ def rsi(series, period=14):
 def signal():
     price = get_price()
 
-    df = fake_ohlcv(price)
-    df["rsi"] = rsi(df["c"])
+    prices = [price] * 20
+    r = rsi(prices).iloc[-1]
 
-    last_rsi = df["rsi"].iloc[-1]
+    if r < 30:
+        return f"🟢 BUY\nPrice: {price}\nRSI: {r:.2f}"
 
-    if last_rsi < 30:
-        return f"🟢 BUY\nPrice: {price}\nRSI: {last_rsi:.2f}"
-
-    if last_rsi > 70:
-        return f"🔴 SELL\nPrice: {price}\nRSI: {last_rsi:.2f}"
+    if r > 70:
+        return f"🔴 SELL\nPrice: {price}\nRSI: {r:.2f}"
 
     return None
 
 
-# 🔁 اجرا
-async def run():
+# 🔁 حلقه ارسال سیگنال
+async def run_bot():
     while True:
         try:
             msg = signal()
@@ -70,5 +71,12 @@ async def run():
             await asyncio.sleep(60)
 
 
+# 🌐 اجرای Flask
+def run_web():
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+
+
+# 🚀 اجرا همزمان
 if __name__ == "__main__":
-    asyncio.run(run())
+    threading.Thread(target=run_web).start()
+    asyncio.run(run_bot())
