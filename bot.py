@@ -7,27 +7,33 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 load_dotenv()
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 
-exchange = ccxt.bybit({"enableRateLimit": True})
-
+# Binance
+exchange = ccxt.binance({
+    "enableRateLimit": True,
+})
 
 def get_price(symbol="BTC/USDT"):
-    return exchange.fetch_ticker(symbol)["last"]
-
+    ticker = exchange.fetch_ticker(symbol)
+    return ticker["last"]
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🤖 ربات آنلاین شد")
 
-
 async def signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    price = get_price()
+    try:
+        price = get_price()
 
-    if price % 2 == 0:
-        sig = "🟢 BUY"
-    else:
-        sig = "🔴 SELL"
+        if int(price) % 2 == 0:
+            sig = "🟢 BUY"
+        else:
+            sig = "🔴 SELL"
 
-    await update.message.reply_text(f"💰 {price}\n🎯 {sig}")
+        await update.message.reply_text(
+            f"💰 BTC: {price:,.2f} USDT\n🎯 {sig}"
+        )
 
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error:\n{e}")
 
 app = Application.builder().token(TOKEN).build()
 app.add_handler(CommandHandler("start", start))
