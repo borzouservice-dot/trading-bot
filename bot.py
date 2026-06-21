@@ -5,17 +5,22 @@ import pandas as pd
 from flask import Flask
 from telegram import Bot
 import threading
+import time
 
 # =========================
 # 🔐 تنظیمات تلگرام
 # =========================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = int(os.getenv("CHAT_ID"))
+
+# تبدیل امن CHAT_ID به int
+CHAT_ID = os.getenv("CHAT_ID")
+if CHAT_ID:
+    CHAT_ID = int(CHAT_ID)
 
 bot = Bot(token=TOKEN)
 
 # =========================
-# 🌐 Flask برای Render (حل مشکل port)
+# 🌐 Flask (حل مشکل Render port)
 # =========================
 app = Flask(__name__)
 
@@ -48,37 +53,49 @@ def get_price():
 
 
 # =========================
-# 📊 RSI ساده
+# 📊 RSI واقعی‌تر (با history ساده)
 # =========================
-def rsi(values, period=14):
-    df = pd.DataFrame(values, columns=["c"])
+price_history = []
 
+def calculate_rsi(prices, period=14):
+    if len(prices) < period + 1:
+        return 50  # مقدار خنثی
+
+    df = pd.DataFrame(prices, columns=["c"])
     delta = df["c"].diff()
+
     gain = delta.where(delta > 0, 0).rolling(period).mean()
     loss = -delta.where(delta < 0, 0).rolling(period).mean()
 
     rs = gain / loss
-    return 100 - (100 / (1 + rs))
+    rsi = 100 - (100 / (1 + rs))
+
+    return rsi.iloc[-1]
 
 
 # =========================
 # 🎯 تولید سیگنال
 # =========================
 def generate_signal(price):
-    print("RSI:", r)
-    r = rsi(prices).iloc[-1]
+    price_history.append(price)
 
-    if r < 30:
-        return f"🟢 BUY SIGNAL\n💰 BTC: {price}\n📊 RSI: {r:.2f}"
+    # نگه داشتن آخرین 30 قیمت
+    if len(price_history) > 30:
+        price_history.pop(0)
 
-    if r > 70:
-        return f"🔴 SELL SIGNAL\n💰 BTC: {price}\n📊 RSI: {r:.2f}"
+    rsi = calculate_rsi(price_history)
+
+    if rsi < 30:
+        return f"🟢 BUY SIGNAL\n💰 BTC: {price}\n📊 RSI: {rsi:.2f}"
+
+    if rsi > 70:
+        return f"🔴 SELL SIGNAL\n💰 BTC: {price}\n📊 RSI: {rsi:.2f}"
 
     return None
 
 
 # =========================
-# 🔁 حلقه اصلی ربات
+# 🔁 loop اصلی
 # =========================
 async def run_bot():
     while True:
@@ -86,29 +103,34 @@ async def run_bot():
             price = get_price()
 
             if price:
+                print("PRICE:", price)
+
                 msg = generate_signal(price)
 
                 if msg:
-                    await bot.send_message(chat_id=CHAT_ID, text=msg)
+                    print("SIGNAL:", msg)
+
+                    await bot.send_message(
+                        chat_id=CHAT_ID,
+                        text=msg
+                    )
+                else:
+                    print("No signal")
 
         except Exception as e:
             print("Loop error:", e)
-            try:
-                await bot.send_message(chat_id=CHAT_ID, text=f"⚠️ Error: {e}")
-            except:
-                pass
 
-        await asyncio.sleep(60)  # هر 1 دقیقه
+        await asyncio.sleep(60)
 
 
 # =========================
-# 🚀 اجرای همزمان Flask + Bot
+# 🚀 اجرا همزمان Flask + Bot
 # =========================
 if __name__ == "__main__":
     print("Bot started...")
 
-    # اجرای وب‌سرور برای Render
+    # جلوگیری از مشکل Render port
     threading.Thread(target=run_web).start()
 
-    # اجرای ربات
+    # شروع ربات
     asyncio.run(run_bot())
