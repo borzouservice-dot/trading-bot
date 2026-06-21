@@ -10,7 +10,7 @@ import threading
 # 🔐 تنظیمات تلگرام
 # =========================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
+CHAT_ID = int(os.getenv("CHAT_ID"))
 
 bot = Bot(token=TOKEN)
 
