@@ -18,8 +18,7 @@ if CHAT_ID:
     CHAT_ID = int(CHAT_ID)
 
 # برای تست
-print("TOKEN:", TOKEN)
-print("CHAT_ID:", CHAT_ID)
+
 
 bot = Bot(token=TOKEN)
 
@@ -46,31 +45,26 @@ def run_web():
 # =========================
 # 💰 گرفتن قیمت Bitcoin
 # =========================
+
 def get_price():
     try:
         print("Getting price...")
 
-        url = "https://api.coingecko.com/api/v3/simple/price"
-
         r = requests.get(
-            url,
-            params={
-                "ids": "bitcoin",
-                "vs_currencies": "usd"
-            },
-            timeout=10
+            "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT",
+            timeout=(5, 10)
         )
 
         print("Status:", r.status_code)
-        print("Text:", r.text)
 
         data = r.json()
-        return data["bitcoin"]["usd"]
+        print(data)
+
+        return float(data["price"])
 
     except Exception as e:
         print("Price error:", repr(e))
         return None
-
 
 # =========================
 # 📊 RSI واقعی‌تر (با history ساده)
