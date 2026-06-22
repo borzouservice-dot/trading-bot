@@ -39,36 +39,37 @@ def run_web():
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
 # =========================
-# 💰 Price - CoinGecko + Retry
+# 💰 Price - CoinPaprika (Rate Limit بالاتر)
 # =========================
-def get_price(max_retries=3):
+def get_price(max_retries=5):
     for attempt in range(max_retries):
         try:
             print(f"📡 Fetching BTC price (attempt {attempt+1})...")
+            
             r = requests.get(
-                "https://api.coingecko.com/api/v3/simple/price",
-                params={"ids": "bitcoin", "vs_currencies": "usd"},
+                "https://api.coinpaprika.com/v1/tickers/btc-bitcoin",
                 timeout=10,
-                headers={"User-Agent": "Mozilla/5.0"}
+                headers={"User-Agent": "Mozilla/5.0 (compatible; TradingBot/1.0)"}
             )
             
             if r.status_code == 429:
-                wait = (2 ** attempt) + random.uniform(0, 1)
-                print(f"⏳ Rate limit (429), waiting {wait:.1f}s...")
+                wait = (2 ** attempt) * 3 + random.uniform(1, 3)
+                print(f"⏳ Rate limit hit, waiting {wait:.1f} seconds...")
                 time.sleep(wait)
                 continue
                 
             r.raise_for_status()
-            price = float(r.json()["bitcoin"]["usd"])
+            data = r.json()
+            price = float(data["quotes"]["USD"]["price"])
             print(f"✅ Price: ${price:,.2f}")
             return price
             
         except Exception as e:
-            print(f"❌ PRICE ERROR (attempt {attempt+1}): {e}")
+            print(f"❌ PRICE ERROR (attempt {attempt+1}): {str(e)[:100]}")
             if attempt < max_retries - 1:
-                time.sleep(2 ** attempt)
-            else:
-                traceback.print_exc()
+                time.sleep(3)
+    
+    print("❌ Failed to get price after all retries")
     return None
 
 # =========================
@@ -78,6 +79,7 @@ price_history = []
 
 def calculate_rsi(prices, period=14):
     if len(prices) < period + 1:
+        print(f"⏳ Building history... ({len(prices)}/{period+1})")
         return 50.0
     try:
         df = pd.DataFrame(prices, columns=["c"])
@@ -87,7 +89,8 @@ def calculate_rsi(prices, period=14):
         rs = gain / loss
         rsi = 100 - (100 / (1 + rs)).iloc[-1]
         return float(rsi)
-    except:
+    except Exception as e:
+        print("RSI calc error:", e)
         return 50.0
 
 # =========================
@@ -95,7 +98,7 @@ def calculate_rsi(prices, period=14):
 # =========================
 def generate_signal(price):
     price_history.append(price)
-    if len(price_history) > 100:
+    if len(price_history) > 120:
         price_history.pop(0)
     
     rsi = calculate_rsi(price_history)
@@ -111,24 +114,26 @@ def generate_signal(price):
 # 🔁 Loop
 # =========================
 def run_bot():
-    print("🔄 Bot loop started")
+    print("🔄 Bot loop started - Checking every 90 seconds")
     last_signal = None
 
     while True:
         try:
             price = get_price()
-            if price:
+            if price is not None:
                 msg = generate_signal(price)
                 if msg and msg != last_signal:
                     print("📣 Sending signal to Telegram...")
                     bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode='Markdown')
-                    print("✅ Signal sent!")
+                    print("✅ Signal sent successfully!")
                     last_signal = msg
+                else:
+                    print("ℹ️ No new signal")
         except Exception as e:
             print("🔥 LOOP ERROR:", e)
             traceback.print_exc()
         
-        time.sleep(60)   # هر ۶۰ ثانیه
+        time.sleep(90)  # افزایش به ۹۰ ثانیه برای جلوگیری از rate limit
 
 # =========================
 # 🚀 Start
