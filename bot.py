@@ -5,32 +5,29 @@ import pandas as pd
 from flask import Flask
 from telegram import Bot
 import threading
-import time
 
 # =========================
 # 🔐 تنظیمات تلگرام
 # =========================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
-
-# تبدیل امن CHAT_ID به int
 CHAT_ID = os.getenv("CHAT_ID")
+
 if CHAT_ID:
     CHAT_ID = int(CHAT_ID)
 
-# برای تست
-
+print("TOKEN LOADED:", bool(TOKEN))
+print("CHAT_ID LOADED:", CHAT_ID)
 
 bot = Bot(token=TOKEN)
 
 # =========================
-# 🌐 Flask (حل مشکل Render port)
+# 🌐 Flask (برای Render)
 # =========================
 app = Flask(__name__)
 
 @app.route("/")
 def home():
     return "Bot is running"
-
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
@@ -41,49 +38,41 @@ def run_web():
         use_reloader=False
     )
 
-
 # =========================
-# 💰 گرفتن قیمت Bitcoin
+# 💰 گرفتن قیمت BTC (پایدار Binance)
 # =========================
-import requests
-
-session = requests.Session()
-
 def get_price():
     try:
         print("Getting price...")
 
-        headers = {
-            "User-Agent": "Mozilla/5.0"
-        }
+        url = "https://api.binance.com/api/v3/ticker/price"
 
-        response = session.get(
-            "https://api.coingecko.com/api/v3/simple/price",
-            params={"ids": "bitcoin", "vs_currencies": "usd"},
-            headers=headers,
-            timeout=(5, 10)
+        r = requests.get(
+            url,
+            params={"symbol": "BTCUSDT"},
+            timeout=(3, 5),
+            headers={"Connection": "close"}
         )
 
-        print("Status:", response.status_code)
+        data = r.json()
+        price = float(data["price"])
 
-        data = response.json()
-        price = data["bitcoin"]["usd"]
-
-        print("API PRICE:", price)
+        print("PRICE:", price)
         return price
 
     except Exception as e:
         print("PRICE ERROR:", repr(e))
         return None
 
+
 # =========================
-# 📊 RSI واقعی‌تر (با history ساده)
+# 📊 RSI
 # =========================
 price_history = []
 
 def calculate_rsi(prices, period=14):
     if len(prices) < period + 1:
-        return 50  # مقدار خنثی
+        return 50
 
     df = pd.DataFrame(prices, columns=["c"])
     delta = df["c"].diff()
@@ -98,16 +87,17 @@ def calculate_rsi(prices, period=14):
 
 
 # =========================
-# 🎯 تولید سیگنال
+# 🎯 سیگنال
 # =========================
 def generate_signal(price):
     price_history.append(price)
 
-    # نگه داشتن آخرین 30 قیمت
     if len(price_history) > 30:
         price_history.pop(0)
 
     rsi = calculate_rsi(price_history)
+
+    print(f"RSI: {rsi:.2f}")
 
     if rsi < 30:
         return f"🟢 BUY SIGNAL\n💰 BTC: {price}\n📊 RSI: {rsi:.2f}"
@@ -119,20 +109,18 @@ def generate_signal(price):
 
 
 # =========================
-# 🔁 loop اصلی
+# 🔁 Bot Loop
 # =========================
 async def run_bot():
     print("run_bot started")
-    while True:
-        print("Loop is running")
-        try:
-            print("Before get_price")
-            price = get_price()
-            print("After get_price")
-            print("Price =", price)
-            if price:
-                print("PRICE:", price)
 
+    while True:
+        try:
+            print("Loop is running")
+
+            price = get_price()
+
+            if price:
                 msg = generate_signal(price)
 
                 if msg:
@@ -146,19 +134,17 @@ async def run_bot():
                     print("No signal")
 
         except Exception as e:
-            print("Loop error:", e)
+            print("LOOP ERROR:", repr(e))
 
         await asyncio.sleep(60)
 
 
 # =========================
-# 🚀 اجرا همزمان Flask + Bot
+# 🚀 Run both Flask + Bot
 # =========================
 if __name__ == "__main__":
     print("Bot started...")
 
-    # جلوگیری از مشکل Render port
     threading.Thread(target=run_web).start()
 
-    # شروع ربات
     asyncio.run(run_bot())
