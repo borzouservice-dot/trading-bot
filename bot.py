@@ -1,5 +1,5 @@
 import os
-import asyncio
+import time
 import requests
 import pandas as pd
 from flask import Flask
@@ -7,21 +7,17 @@ from telegram import Bot
 import threading
 
 # =========================
-# 🔐 تنظیمات تلگرام
+# 🔐 Telegram
 # =========================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
+CHAT_ID = int(os.getenv("CHAT_ID"))
 
-if CHAT_ID:
-    CHAT_ID = int(CHAT_ID)
-
-print("TOKEN LOADED:", bool(TOKEN))
-print("CHAT_ID LOADED:", CHAT_ID)
+print("Bot starting...")
 
 bot = Bot(token=TOKEN)
 
 # =========================
-# 🌐 Flask (برای Render)
+# 🌐 Flask
 # =========================
 app = Flask(__name__)
 
@@ -31,39 +27,22 @@ def home():
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
-    app.run(
-        host="0.0.0.0",
-        port=port,
-        debug=False,
-        use_reloader=False
-    )
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
 # =========================
-# 💰 گرفتن قیمت BTC (پایدار Binance)
+# 💰 Price
 # =========================
 def get_price():
     try:
-        print("Getting price...")
-
-        url = "https://api.binance.com/api/v3/ticker/price"
-
         r = requests.get(
-            url,
+            "https://api.binance.com/api/v3/ticker/price",
             params={"symbol": "BTCUSDT"},
-            timeout=(3, 5),
-            headers={"Connection": "close"}
+            timeout=5
         )
-
-        data = r.json()
-        price = float(data["price"])
-
-        print("PRICE:", price)
-        return price
-
+        return float(r.json()["price"])
     except Exception as e:
-        print("PRICE ERROR:", repr(e))
+        print("PRICE ERROR:", e)
         return None
-
 
 # =========================
 # 📊 RSI
@@ -81,13 +60,10 @@ def calculate_rsi(prices, period=14):
     loss = -delta.where(delta < 0, 0).rolling(period).mean()
 
     rs = gain / loss
-    rsi = 100 - (100 / (1 + rs))
-
-    return rsi.iloc[-1]
-
+    return 100 - (100 / (1 + rs)).iloc[-1]
 
 # =========================
-# 🎯 سیگنال
+# 🎯 Signal
 # =========================
 def generate_signal(price):
     price_history.append(price)
@@ -97,36 +73,35 @@ def generate_signal(price):
 
     rsi = calculate_rsi(price_history)
 
-    print(f"RSI: {rsi:.2f}")
+    print("RSI:", rsi)
 
     if rsi < 30:
-        return f"🟢 BUY SIGNAL\n💰 BTC: {price}\n📊 RSI: {rsi:.2f}"
+        return f"🟢 BUY\nBTC: {price}\nRSI: {rsi:.2f}"
 
     if rsi > 70:
-        return f"🔴 SELL SIGNAL\n💰 BTC: {price}\n📊 RSI: {rsi:.2f}"
+        return f"🔴 SELL\nBTC: {price}\nRSI: {rsi:.2f}"
 
     return None
 
-
 # =========================
-# 🔁 Bot Loop
+# 🔁 Bot loop (IMPORTANT: بدون asyncio)
 # =========================
-async def run_bot():
+def run_bot():
     print("run_bot started")
 
     while True:
         try:
-            print("Loop is running")
-
             price = get_price()
 
             if price:
+                print("PRICE:", price)
+
                 msg = generate_signal(price)
 
                 if msg:
                     print("SIGNAL:", msg)
 
-                    await bot.send_message(
+                    bot.send_message(
                         chat_id=CHAT_ID,
                         text=msg
                     )
@@ -134,17 +109,13 @@ async def run_bot():
                     print("No signal")
 
         except Exception as e:
-            print("LOOP ERROR:", repr(e))
+            print("LOOP ERROR:", e)
 
-        await asyncio.sleep(60)
-
+        time.sleep(60)
 
 # =========================
-# 🚀 Run both Flask + Bot
+# 🚀 MAIN
 # =========================
 if __name__ == "__main__":
-    print("Bot started...")
-
     threading.Thread(target=run_web).start()
-
-    asyncio.run(run_bot())
+    run_bot()
