@@ -53,28 +53,28 @@ def get_price():
     try:
         print("Getting price...")
 
+        headers = {
+            "User-Agent": "Mozilla/5.0"
+        }
+
         response = session.get(
             "https://api.coingecko.com/api/v3/simple/price",
-            params={
-                "ids": "bitcoin",
-                "vs_currencies": "usd"
-            },
+            params={"ids": "bitcoin", "vs_currencies": "usd"},
+            headers=headers,
             timeout=(5, 10)
         )
 
         print("Status:", response.status_code)
 
-        response.raise_for_status()
-
         data = response.json()
-        print(data)
+        price = data["bitcoin"]["usd"]
 
-        return data["bitcoin"]["usd"]
+        print("API PRICE:", price)
+        return price
 
     except Exception as e:
-        print(type(e).__name__, e)
+        print("PRICE ERROR:", repr(e))
         return None
-
 
 # =========================
 # 📊 RSI واقعی‌تر (با history ساده)
