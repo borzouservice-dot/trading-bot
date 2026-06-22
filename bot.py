@@ -17,6 +17,10 @@ CHAT_ID = os.getenv("CHAT_ID")
 if CHAT_ID:
     CHAT_ID = int(CHAT_ID)
 
+# برای تست
+print("TOKEN:", TOKEN)
+print("CHAT_ID:", CHAT_ID)
+
 bot = Bot(token=TOKEN)
 
 # =========================
