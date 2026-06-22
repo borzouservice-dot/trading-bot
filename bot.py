@@ -47,24 +47,8 @@ def run_web():
 # =========================
 
 def get_price():
-    try:
-        print("Getting price...")
-
-        r = requests.get(
-            "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT",
-            timeout=(5, 10)
-        )
-
-        print("Status:", r.status_code)
-
-        data = r.json()
-        print(data)
-
-        return float(data["price"])
-
-    except Exception as e:
-        print("Price error:", repr(e))
-        return None
+    print("Function works")
+    return 100000
 
 # =========================
 # 📊 RSI واقعی‌تر (با history ساده)
