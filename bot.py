@@ -6,6 +6,7 @@ from flask import Flask
 from telegram import Bot
 import threading
 import traceback
+import random
 
 # =========================
 # 🔐 Config
@@ -38,24 +39,37 @@ def run_web():
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
 # =========================
-# 💰 Price - CoinGecko (بهتر از Binance روی Render)
+# 💰 Price - CoinGecko + Retry
 # =========================
-def get_price():
-    try:
-        print("📡 Fetching BTC price from CoinGecko...")
-        r = requests.get(
-            "https://api.coingecko.com/api/v3/simple/price",
-            params={"ids": "bitcoin", "vs_currencies": "usd"},
-            timeout=10
-        )
-        r.raise_for_status()
-        price = float(r.json()["bitcoin"]["usd"])
-        print(f"✅ Price: {price}")
-        return price
-    except Exception as e:
-        print("❌ PRICE ERROR:", e)
-        traceback.print_exc()
-        return None
+def get_price(max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            print(f"📡 Fetching BTC price (attempt {attempt+1})...")
+            r = requests.get(
+                "https://api.coingecko.com/api/v3/simple/price",
+                params={"ids": "bitcoin", "vs_currencies": "usd"},
+                timeout=10,
+                headers={"User-Agent": "Mozilla/5.0"}
+            )
+            
+            if r.status_code == 429:
+                wait = (2 ** attempt) + random.uniform(0, 1)
+                print(f"⏳ Rate limit (429), waiting {wait:.1f}s...")
+                time.sleep(wait)
+                continue
+                
+            r.raise_for_status()
+            price = float(r.json()["bitcoin"]["usd"])
+            print(f"✅ Price: ${price:,.2f}")
+            return price
+            
+        except Exception as e:
+            print(f"❌ PRICE ERROR (attempt {attempt+1}): {e}")
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+            else:
+                traceback.print_exc()
+    return None
 
 # =========================
 # 📊 RSI
@@ -85,7 +99,7 @@ def generate_signal(price):
         price_history.pop(0)
     
     rsi = calculate_rsi(price_history)
-    print(f"📊 PRICE: {price:.2f} | RSI: {rsi:.2f}")
+    print(f"📊 PRICE: ${price:,.2f} | RSI: {rsi:.2f}")
     
     if rsi < 30:
         return f"🟢 **BUY SIGNAL**\nBTC: ${price:,.2f}\nRSI: {rsi:.2f}"
@@ -106,7 +120,7 @@ def run_bot():
             if price:
                 msg = generate_signal(price)
                 if msg and msg != last_signal:
-                    print("📣 Sending signal...")
+                    print("📣 Sending signal to Telegram...")
                     bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode='Markdown')
                     print("✅ Signal sent!")
                     last_signal = msg
@@ -114,7 +128,7 @@ def run_bot():
             print("🔥 LOOP ERROR:", e)
             traceback.print_exc()
         
-        time.sleep(60)
+        time.sleep(60)   # هر ۶۰ ثانیه
 
 # =========================
 # 🚀 Start
