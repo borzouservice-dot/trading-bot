@@ -34,26 +34,26 @@ def home():
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
-    print(f"🌐 Flask started on port {port}")
+    print(f"🌐 Flask on port {port}")
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
 # =========================
-# 💰 Price (FIXED)
+# 💰 Price - CoinGecko (بهتر از Binance روی Render)
 # =========================
 def get_price():
     try:
-        print("📡 Fetching BTC price...")
-        # استفاده از data.binance.com که کمتر بلاک می‌شه
+        print("📡 Fetching BTC price from CoinGecko...")
         r = requests.get(
-            "https://data.binance.com/api/v3/ticker/price?symbol=BTCUSDT",
+            "https://api.coingecko.com/api/v3/simple/price",
+            params={"ids": "bitcoin", "vs_currencies": "usd"},
             timeout=10
         )
         r.raise_for_status()
-        price = float(r.json()["price"])
+        price = float(r.json()["bitcoin"]["usd"])
         print(f"✅ Price: {price}")
         return price
     except Exception as e:
-        print("❌ PRICE ERROR:", str(e))
+        print("❌ PRICE ERROR:", e)
         traceback.print_exc()
         return None
 
@@ -88,9 +88,9 @@ def generate_signal(price):
     print(f"📊 PRICE: {price:.2f} | RSI: {rsi:.2f}")
     
     if rsi < 30:
-        return f"🟢 **BUY SIGNAL**\nBTC: {price:.2f} USDT\nRSI: {rsi:.2f}"
+        return f"🟢 **BUY SIGNAL**\nBTC: ${price:,.2f}\nRSI: {rsi:.2f}"
     elif rsi > 70:
-        return f"🔴 **SELL SIGNAL**\nBTC: {price:.2f} USDT\nRSI: {rsi:.2f}"
+        return f"🔴 **SELL SIGNAL**\nBTC: ${price:,.2f}\nRSI: {rsi:.2f}"
     return None
 
 # =========================
@@ -106,7 +106,7 @@ def run_bot():
             if price:
                 msg = generate_signal(price)
                 if msg and msg != last_signal:
-                    print("📣 Sending signal to Telegram...")
+                    print("📣 Sending signal...")
                     bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode='Markdown')
                     print("✅ Signal sent!")
                     last_signal = msg
