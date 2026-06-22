@@ -1,5 +1,6 @@
 import os
 import time
+import asyncio
 from dotenv import load_dotenv
 from telegram import Bot
 from telegram.constants import ParseMode
@@ -22,35 +23,34 @@ print("Bot started...")
 
 bot = Bot(token=TOKEN)
 
-def send_message(text):
+async def send_message(text):
     try:
-        bot.send_message(chat_id=CHAT_ID, text=text, parse_mode=ParseMode.HTML)
-        print(f"📤 پیام ارسال شد: {text[:50]}...")
+        await bot.send_message(chat_id=CHAT_ID, text=text, parse_mode=ParseMode.HTML)
+        print(f"📤 پیام ارسال شد: {text[:60]}...")
     except Exception as e:
         print(f"❌ خطا در ارسال پیام: {e}")
 
 def get_price():
     print("Before get_price")
     print("Getting price...")
-    # بعداً کد واقعی قیمت رو اینجا می‌ذاریم
-    return 65000
+    return 65000  # بعداً واقعی می‌کنیم
 
-def run_bot():
+async def run_bot():
     print("run_bot started")
-    send_message("✅ <b>ربات تریدینگ شروع به کار کرد!</b>\n\nربات آنلاین است 🚀")
+    await send_message("✅ <b>ربات تریدینگ شروع به کار کرد!</b>\n\nربات آنلاین است 🚀")
     
     while True:
         print("Loop is running")
         try:
             price = get_price()
-            # هر ۱۰ بار یک پیام تست بفرست (برای جلوگیری از اسپم)
-            if int(time.time()) % 600 == 0:   # هر ۱۰ دقیقه یک پیام
-                send_message(f"🔄 قیمت فعلی: <b>${price}</b>")
+            # هر ۱۰ دقیقه یک پیام وضعیت
+            if int(time.time()) % 600 == 0:
+                await send_message(f"🔄 قیمت فعلی: <b>${price}</b>")
         except Exception as e:
             print(f"Error: {e}")
-            send_message(f"⚠️ خطا: {e}")
+            await send_message(f"⚠️ خطا: {e}")
         
-        time.sleep(60)  # هر ۶۰ ثانیه
+        await asyncio.sleep(60)  # هر ۶۰ ثانیه
 
 if __name__ == "__main__":
-    run_bot()
+    asyncio.run(run_bot())
