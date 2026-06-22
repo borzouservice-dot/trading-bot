@@ -45,10 +45,36 @@ def run_web():
 # =========================
 # 💰 گرفتن قیمت Bitcoin
 # =========================
+import requests
+
+session = requests.Session()
 
 def get_price():
-    print("Function works")
-    return 100000
+    try:
+        print("Getting price...")
+
+        response = session.get(
+            "https://api.coingecko.com/api/v3/simple/price",
+            params={
+                "ids": "bitcoin",
+                "vs_currencies": "usd"
+            },
+            timeout=(5, 10)
+        )
+
+        print("Status:", response.status_code)
+
+        response.raise_for_status()
+
+        data = response.json()
+        print(data)
+
+        return data["bitcoin"]["usd"]
+
+    except Exception as e:
+        print(type(e).__name__, e)
+        return None
+
 
 # =========================
 # 📊 RSI واقعی‌تر (با history ساده)
