@@ -14,11 +14,10 @@ TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 print("🚀 Bot starting...")
-print(f"✅ TOKEN exists: {bool(TOKEN)}")
-print(f"✅ CHAT_ID exists: {bool(CHAT_ID)}")
+print(f"✅ TOKEN: {bool(TOKEN)} | CHAT_ID: {bool(CHAT_ID)}")
 
 if not TOKEN or not CHAT_ID:
-    print("❌ Missing environment variables!")
+    print("❌ Missing env variables!")
     exit(1)
 
 bot = Bot(token=TOKEN)
@@ -35,25 +34,26 @@ def home():
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
-    print(f"🌐 Starting Flask on port {port}")
+    print(f"🌐 Flask started on port {port}")
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
 # =========================
-# 💰 Price Fetch
+# 💰 Price (FIXED)
 # =========================
 def get_price():
     try:
         print("📡 Fetching BTC price...")
+        # استفاده از data.binance.com که کمتر بلاک می‌شه
         r = requests.get(
-            "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT",
-            timeout=8
+            "https://data.binance.com/api/v3/ticker/price?symbol=BTCUSDT",
+            timeout=10
         )
         r.raise_for_status()
         price = float(r.json()["price"])
-        print(f"✅ Price received: {price}")
+        print(f"✅ Price: {price}")
         return price
     except Exception as e:
-        print("❌ PRICE ERROR:", e)
+        print("❌ PRICE ERROR:", str(e))
         traceback.print_exc()
         return None
 
@@ -64,7 +64,6 @@ price_history = []
 
 def calculate_rsi(prices, period=14):
     if len(prices) < period + 1:
-        print(f"⏳ Not enough data yet ({len(prices)}/{period+1})")
         return 50.0
     try:
         df = pd.DataFrame(prices, columns=["c"])
@@ -74,8 +73,7 @@ def calculate_rsi(prices, period=14):
         rs = gain / loss
         rsi = 100 - (100 / (1 + rs)).iloc[-1]
         return float(rsi)
-    except Exception as e:
-        print("RSI Calculation Error:", e)
+    except:
         return 50.0
 
 # =========================
@@ -96,12 +94,11 @@ def generate_signal(price):
     return None
 
 # =========================
-# 🔁 Main Loop
+# 🔁 Loop
 # =========================
 def run_bot():
-    print("🔄 run_bot loop started")
+    print("🔄 Bot loop started")
     last_signal = None
-    error_count = 0
 
     while True:
         try:
@@ -109,19 +106,18 @@ def run_bot():
             if price:
                 msg = generate_signal(price)
                 if msg and msg != last_signal:
-                    print("📣 SENDING SIGNAL...")
+                    print("📣 Sending signal to Telegram...")
                     bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode='Markdown')
-                    print("✅ Signal sent successfully")
+                    print("✅ Signal sent!")
                     last_signal = msg
         except Exception as e:
-            error_count += 1
-            print(f"🔥 LOOP ERROR #{error_count}: {e}")
+            print("🔥 LOOP ERROR:", e)
             traceback.print_exc()
         
         time.sleep(60)
 
 # =========================
-# 🚀 START
+# 🚀 Start
 # =========================
 if __name__ == "__main__":
     threading.Thread(target=run_web, daemon=True).start()
