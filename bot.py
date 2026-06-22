@@ -5,24 +5,24 @@ import pandas as pd
 from flask import Flask
 from telegram import Bot
 import threading
+import traceback
 
 # =========================
-# 🔐 Telegram
+# 🔐 Config
 # =========================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-print("Bot starting...")
-print(f"TOKEN exists: {bool(TOKEN)}")
-print(f"CHAT_ID exists: {bool(CHAT_ID)}")
+print("🚀 Bot starting...")
+print(f"✅ TOKEN exists: {bool(TOKEN)}")
+print(f"✅ CHAT_ID exists: {bool(CHAT_ID)}")
 
-if not TOKEN:
-    print("❌ ERROR: TELEGRAM_TOKEN is not set!")
-if not CHAT_ID:
-    print("❌ ERROR: CHAT_ID is not set!")
+if not TOKEN or not CHAT_ID:
+    print("❌ Missing environment variables!")
+    exit(1)
 
 bot = Bot(token=TOKEN)
-CHAT_ID = int(CHAT_ID) if CHAT_ID else None
+CHAT_ID = int(CHAT_ID)
 
 # =========================
 # 🌐 Flask
@@ -31,26 +31,30 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "Bot is running ✅"
+    return "✅ Trading Bot is running!"
 
 def run_web():
     port = int(os.environ.get("PORT", 10000))
+    print(f"🌐 Starting Flask on port {port}")
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
 # =========================
-# 💰 Price
+# 💰 Price Fetch
 # =========================
 def get_price():
     try:
+        print("📡 Fetching BTC price...")
         r = requests.get(
-            "https://api.binance.com/api/v3/ticker/price",
-            params={"symbol": "BTCUSDT"},
-            timeout=10
+            "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT",
+            timeout=8
         )
         r.raise_for_status()
-        return float(r.json()["price"])
+        price = float(r.json()["price"])
+        print(f"✅ Price received: {price}")
+        return price
     except Exception as e:
-        print("PRICE ERROR:", e)
+        print("❌ PRICE ERROR:", e)
+        traceback.print_exc()
         return None
 
 # =========================
@@ -60,25 +64,30 @@ price_history = []
 
 def calculate_rsi(prices, period=14):
     if len(prices) < period + 1:
+        print(f"⏳ Not enough data yet ({len(prices)}/{period+1})")
         return 50.0
-    df = pd.DataFrame(prices, columns=["c"])
-    delta = df["c"].diff()
-    gain = delta.where(delta > 0, 0).rolling(period).mean()
-    loss = -delta.where(delta < 0, 0).rolling(period).mean()
-    rs = gain / loss
-    rsi = 100 - (100 / (1 + rs)).iloc[-1]
-    return float(rsi)
+    try:
+        df = pd.DataFrame(prices, columns=["c"])
+        delta = df["c"].diff()
+        gain = delta.where(delta > 0, 0).rolling(period).mean()
+        loss = -delta.where(delta < 0, 0).rolling(period).mean()
+        rs = gain / loss
+        rsi = 100 - (100 / (1 + rs)).iloc[-1]
+        return float(rsi)
+    except Exception as e:
+        print("RSI Calculation Error:", e)
+        return 50.0
 
 # =========================
 # 🎯 Signal
 # =========================
 def generate_signal(price):
     price_history.append(price)
-    if len(price_history) > 100:   # افزایش ظرفیت تاریخچه
+    if len(price_history) > 100:
         price_history.pop(0)
     
     rsi = calculate_rsi(price_history)
-    print(f"PRICE: {price} | RSI: {rsi:.2f}")
+    print(f"📊 PRICE: {price:.2f} | RSI: {rsi:.2f}")
     
     if rsi < 30:
         return f"🟢 **BUY SIGNAL**\nBTC: {price:.2f} USDT\nRSI: {rsi:.2f}"
@@ -87,36 +96,33 @@ def generate_signal(price):
     return None
 
 # =========================
-# 🔁 Bot loop
+# 🔁 Main Loop
 # =========================
 def run_bot():
-    print("run_bot started")
+    print("🔄 run_bot loop started")
     last_signal = None
-    
+    error_count = 0
+
     while True:
         try:
             price = get_price()
             if price:
                 msg = generate_signal(price)
-                if msg and msg != last_signal:   # جلوگیری از تکرار سیگنال
-                    print("SIGNAL:", msg)
+                if msg and msg != last_signal:
+                    print("📣 SENDING SIGNAL...")
                     bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode='Markdown')
+                    print("✅ Signal sent successfully")
                     last_signal = msg
-                # else:
-                #     print("No signal or duplicate")
         except Exception as e:
-            print("LOOP ERROR:", e)
-            import traceback
+            error_count += 1
+            print(f"🔥 LOOP ERROR #{error_count}: {e}")
             traceback.print_exc()
         
         time.sleep(60)
 
 # =========================
-# 🚀 MAIN
+# 🚀 START
 # =========================
 if __name__ == "__main__":
-    if not TOKEN or not CHAT_ID:
-        print("❌ Cannot start bot: Missing environment variables")
-    else:
-        threading.Thread(target=run_web, daemon=True).start()
-        run_bot()
+    threading.Thread(target=run_web, daemon=True).start()
+    run_bot()
