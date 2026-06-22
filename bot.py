@@ -102,10 +102,12 @@ def generate_signal(price):
 # 🔁 loop اصلی
 # =========================
 async def run_bot():
+    print("run_bot started")
     while True:
+        print("Loop is running")
         try:
             price = get_price()
-
+            print("Price =", price)
             if price:
                 print("PRICE:", price)
 
