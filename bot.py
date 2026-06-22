@@ -38,39 +38,39 @@ def run_web():
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
 # =========================
-# 💰 Price - استفاده از Binance + Proxy fallback
+# 💰 Price Fetcher - چند API با timeout کوتاه
 # =========================
 def get_price():
-    try:
-        print("📡 Trying Binance...")
-        r = requests.get(
-            "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT",
-            timeout=8,
-            headers={"User-Agent": "Mozilla/5.0"}
-        )
-        if r.status_code == 200:
-            price = float(r.json()["price"])
-            print(f"✅ Binance Success: ${price:,.2f}")
-            return price
-    except:
-        pass
-
-    # Fallback به CoinGecko با تاخیر
-    try:
-        print("📡 Trying CoinGecko...")
-        r = requests.get(
-            "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
-            timeout=8,
-            headers={"User-Agent": "Mozilla/5.0"}
-        )
-        if r.status_code == 200:
-            price = float(r.json()["bitcoin"]["usd"])
-            print(f"✅ CoinGecko Success: ${price:,.2f}")
-            return price
-    except:
-        pass
-
-    print("❌ All APIs failed")
+    apis = [
+        ("Binance", "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"),
+        ("Binance Mirror", "https://api1.binance.com/api/v3/ticker/price?symbol=BTCUSDT"),
+        ("CoinGecko", "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"),
+        ("CoinPaprika", "https://api.coinpaprika.com/v1/tickers/btc-bitcoin"),
+    ]
+    
+    for name, url in apis:
+        try:
+            print(f"📡 Trying {name}...")
+            r = requests.get(url, timeout=6, headers={"User-Agent": "Mozilla/5.0"})
+            
+            print(f"   {name} Status: {r.status_code}")
+            
+            if r.status_code == 200:
+                data = r.json()
+                if name == "Binance" or name == "Binance Mirror":
+                    price = float(data["price"])
+                elif name == "CoinGecko":
+                    price = float(data["bitcoin"]["usd"])
+                else:  # CoinPaprika
+                    price = float(data["quotes"]["USD"]["price"])
+                
+                print(f"✅ {name} Success → ${price:,.2f}")
+                return price
+        except Exception as e:
+            print(f"   {name} Failed: {type(e).__name__}")
+            continue  # بعدی رو امتحان کن
+    
+    print("❌ All price APIs failed")
     return None
 
 # =========================
@@ -113,7 +113,7 @@ def generate_signal(price):
 # 🔁 Loop
 # =========================
 def run_bot():
-    print("🔄 Bot loop started")
+    print("🔄 Bot loop started (every 2 minutes)")
     last_signal = None
 
     while True:
@@ -125,14 +125,14 @@ def run_bot():
                     bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode='Markdown')
                     print("✅ Signal sent to Telegram!")
                     last_signal = msg
-                except Exception as e:
-                    print("Telegram send error:", e)
+                except Exception as te:
+                    print("Telegram Error:", te)
             else:
-                print("ℹ️ No signal this time")
+                print("ℹ️ No new signal")
         else:
-            print("⚠️ Could not fetch price this cycle")
+            print("⚠️ Price fetch failed this round")
 
-        time.sleep(120)  # ۲ دقیقه یکبار
+        time.sleep(120)
 
 # =========================
 # 🚀 Start
