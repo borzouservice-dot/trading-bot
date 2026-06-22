@@ -48,11 +48,27 @@ def run_web():
 # =========================
 def get_price():
     try:
+        print("Getting price...")
+
         url = "https://api.coingecko.com/api/v3/simple/price"
-        r = requests.get(url, timeout=10).json()
-        return r["bitcoin"]["usd"]
+
+        r = requests.get(
+            url,
+            params={
+                "ids": "bitcoin",
+                "vs_currencies": "usd"
+            },
+            timeout=10
+        )
+
+        print("Status:", r.status_code)
+        print("Text:", r.text)
+
+        data = r.json()
+        return data["bitcoin"]["usd"]
+
     except Exception as e:
-        print("Price error:", e)
+        print("Price error:", repr(e))
         return None
 
 
@@ -106,7 +122,9 @@ async def run_bot():
     while True:
         print("Loop is running")
         try:
+            print("Before get_price")
             price = get_price()
+            print("After get_price")
             print("Price =", price)
             if price:
                 print("PRICE:", price)
