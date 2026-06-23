@@ -5,38 +5,16 @@ import torch.nn as nn
 import torch.optim as optim
 import time
 
-# =========================
-# CONFIG
-# =========================
+# ================= CONFIG =================
 STATE_SIZE = 5
 ACTIONS = ["LONG", "SHORT", "HOLD"]
 
 GAMMA = 0.95
 LR = 0.001
-MEMORY_SIZE = 5000
 BATCH_SIZE = 32
+MEMORY = []
 
-# =========================
-# FEATURE ENGINE
-# =========================
-def get_state(closes):
-    closes = np.array(closes)
-
-    if len(closes) < 20:
-        return np.zeros(STATE_SIZE)
-
-    return np.array([
-        (closes[-1] - closes[-2]) / closes[-2],
-        np.mean(closes[-5:]) / closes[-1],
-        np.mean(closes[-20:]) / closes[-1],
-        np.std(closes[-10:]) / closes[-1],
-        closes[-1] - np.min(closes[-20:])
-    ], dtype=np.float32)
-
-
-# =========================
-# DQN MODEL
-# =========================
+# ================= MODEL =================
 class DQN(nn.Module):
     def __init__(self):
         super().__init__()
@@ -52,142 +30,128 @@ class DQN(nn.Module):
         return self.net(x)
 
 
-# =========================
-# AGENT
-# =========================
-class Agent:
-    def __init__(self):
+policy = DQN()
+target = DQN()
+target.load_state_dict(policy.state_dict())
 
-        self.model = DQN()
-        self.target = DQN()
-        self.target.load_state_dict(self.model.state_dict())
+opt = optim.Adam(policy.parameters(), lr=LR)
+loss_fn = nn.MSELoss()
 
-        self.memory = []
-        self.optimizer = optim.Adam(self.model.parameters(), lr=LR)
+# ================= STATE =================
+def get_state(prices):
+    prices = np.array(prices)
 
-    def act(self, state, epsilon=0.1):
+    if len(prices) < 20:
+        return np.zeros(STATE_SIZE)
 
-        if random.random() < epsilon:
-            return random.randint(0, 2)
-
-        state = torch.tensor(state, dtype=torch.float32)
-        q_values = self.model(state)
-
-        return torch.argmax(q_values).item()
-
-    def store(self, exp):
-
-        if len(self.memory) > MEMORY_SIZE:
-            self.memory.pop(0)
-
-        self.memory.append(exp)
+    return np.array([
+        prices[-1] - prices[-2],
+        np.mean(prices[-5:]),
+        np.mean(prices[-20:]),
+        np.std(prices[-10:]),
+        prices[-1] - np.min(prices[-20:])
+    ], dtype=np.float32)
 
 
-# =========================
-# REWARD FUNCTION
-# =========================
+# ================= MEMORY =================
+def store(exp):
+    if len(MEMORY) > 5000:
+        MEMORY.pop(0)
+    MEMORY.append(exp)
+
+
+# ================= ACT =================
+def act(state, eps=0.1):
+    if random.random() < eps:
+        return random.randint(0, 2)
+
+    state = torch.tensor(state, dtype=torch.float32).unsqueeze(0)
+    return torch.argmax(policy(state)).item()
+
+
+# ================= REWARD =================
 def reward(entry, exit_price, side):
-
     if side == "LONG":
         return exit_price - entry
-
     if side == "SHORT":
         return entry - exit_price
-
     return 0
 
 
-# =========================
-# TRAINING
-# =========================
-def train(agent):
+# ================= TRAIN =================
+def train():
 
-    if len(agent.memory) < BATCH_SIZE:
+    if len(MEMORY) < BATCH_SIZE:
         return
 
-    batch = random.sample(agent.memory, BATCH_SIZE)
+    batch = random.sample(MEMORY, BATCH_SIZE)
 
-    for state, action, r, next_state, done in batch:
+    states, actions, rewards, next_states = zip(*batch)
 
-        state = torch.tensor(state, dtype=torch.float32)
-        next_state = torch.tensor(next_state, dtype=torch.float32)
+    states = torch.tensor(np.array(states), dtype=torch.float32)
+    next_states = torch.tensor(np.array(next_states), dtype=torch.float32)
+    actions = torch.tensor(actions)
+    rewards = torch.tensor(rewards, dtype=torch.float32)
 
-        q_val = agent.model(state)[action]
+    q_values = policy(states).gather(1, actions.unsqueeze(1)).squeeze()
 
-        target = r
+    with torch.no_grad():
+        next_q = target(next_states).max(1)[0]
 
-        if not done:
-            target += GAMMA * torch.max(agent.target(next_state))
+    targets = rewards + GAMMA * next_q
 
-        loss = (q_val - target) ** 2
+    loss = loss_fn(q_values, targets)
 
-        agent.optimizer.zero_grad()
-        loss.backward()
-        agent.optimizer.step()
-
-
-# =========================
-# FAKE MARKET DATA
-# =========================
-def fake_price(last_price):
-    return last_price + random.randint(-3, 3)
+    opt.zero_grad()
+    loss.backward()
+    opt.step()
 
 
-# =========================
-# MAIN LOOP
-# =========================
+# ================= MARKET =================
+def fake_price(p):
+    return p + random.randint(-2, 2)
+
+
+# ================= LOOP =================
 def run():
 
-    agent = Agent()
-
-    closes = [100]
+    prices = [100]
     position = None
+    entry = 0
+    entry_action = 2
 
-    entry_price = 0
-    entry_action = None
-
-    print("🚀 LEVEL 8 RL TRADING SYSTEM STARTED")
+    print("🚀 FIXED RL SYSTEM RUNNING")
 
     while True:
 
-        price = fake_price(closes[-1])
-        closes.append(price)
+        price = fake_price(prices[-1])
+        prices.append(price)
 
-        if len(closes) > 100:
-            closes.pop(0)
+        state = get_state(prices)
+        action = act(state)
 
-        state = get_state(closes)
-        action = agent.act(state)
-
-        # OPEN POSITION
+        # OPEN
         if position is None and action != 2:
-
             position = True
-            entry_price = price
+            entry = price
             entry_action = action
+            print("OPEN", ACTIONS[action], price)
 
-            print(f"OPEN {ACTIONS[action]} @ {price}")
-
-        # CLOSE POSITION
+        # CLOSE
         elif position:
+            r = reward(entry, price, ACTIONS[entry_action])
+            next_state = get_state(prices)
 
-            r = reward(entry_price, price, ACTIONS[entry_action])
+            store((state, entry_action, r, next_state))
 
-            next_state = get_state(closes)
+            train()
 
-            agent.store((state, entry_action, r, next_state, True))
-
-            train(agent)
-
-            print(f"CLOSE | PnL: {r:.2f}")
+            print("CLOSE PnL:", round(r, 2))
 
             position = None
 
-        time.sleep(1)
+        time.sleep(0.5)
 
 
-# =========================
-# START
-# =========================
 if __name__ == "__main__":
     run()
