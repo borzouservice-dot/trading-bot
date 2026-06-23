@@ -1,7 +1,6 @@
 import os
 import time
 import asyncio
-import csv
 from dotenv import load_dotenv
 from telegram import Bot
 from telegram.constants import ParseMode
@@ -33,7 +32,14 @@ stats = {
     "equity": 1000
 }
 
-TRADE_FILE = "trades.csv"
+# 🧠 RISK ENGINE STATE
+risk_state = {
+    "loss_streak": 0,
+    "cooldown": 0,
+    "max_loss_streak": 3,
+    "max_drawdown": 0.90,   # 10% stop
+    "trading_paused": False
+}
 
 # ================= INDICATORS =================
 def sma(data, n):
@@ -81,6 +87,18 @@ def signal(closes):
 
     return None
 
+# ================= RISK CHECK =================
+def risk_check():
+    global risk_state, stats
+
+    # 💣 equity protection
+    if stats["equity"] < 1000 * risk_state["max_drawdown"]:
+        risk_state["trading_paused"] = True
+
+    # 💣 loss streak protection
+    if risk_state["loss_streak"] >= risk_state["max_loss_streak"]:
+        risk_state["cooldown"] = 10  # skip cycles
+
 # ================= TRADE ENGINE =================
 def open_trade(side, price):
     global active_trade
@@ -93,12 +111,11 @@ def open_trade(side, price):
     }
 
 def close_trade(price):
-    global active_trade, stats
+    global active_trade, stats, risk_state
 
     entry = active_trade["entry"]
     side = active_trade["side"]
 
-    # 📊 PnL calculation
     pnl = (price - entry) if side == "LONG" else (entry - price)
 
     stats["equity"] += pnl
@@ -106,68 +123,12 @@ def close_trade(price):
 
     if pnl > 0:
         stats["wins"] += 1
+        risk_state["loss_streak"] = 0
     else:
         stats["losses"] += 1
-
-    # 💾 log trade
-    write_trade(side, entry, price, pnl)
+        risk_state["loss_streak"] += 1
 
     active_trade = None
-
-def write_trade(side, entry, exit_price, pnl):
-    file_exists = os.path.isfile(TRADE_FILE)
-
-    with open(TRADE_FILE, "a", newline="") as f:
-        writer = csv.writer(f)
-
-        if not file_exists:
-            writer.writerow(["time", "side", "entry", "exit", "pnl"])
-
-        writer.writerow([
-            time.strftime("%Y-%m-%d %H:%M:%S"),
-            side,
-            entry,
-            exit_price,
-            pnl
-        ])
-
-def check_trade(price):
-    global active_trade
-
-    if not active_trade:
-        return
-
-    t = active_trade
-
-    if t["side"] == "LONG":
-        if price >= t["tp"]:
-            close_trade(price)
-        elif price <= t["sl"]:
-            close_trade(price)
-
-    elif t["side"] == "SHORT":
-        if price <= t["tp"]:
-            close_trade(price)
-        elif price >= t["sl"]:
-            close_trade(price)
-
-# ================= REPORT =================
-def report():
-    if stats["total"] == 0:
-        return "📊 No trades yet"
-
-    winrate = (stats["wins"] / stats["total"]) * 100
-
-    return f"""
-📊 PERFORMANCE REPORT (LEVEL 8.9)
-
-💰 Equity: {stats['equity']:.2f}
-📈 Winrate: {winrate:.2f}%
-
-✅ Wins: {stats['wins']}
-❌ Losses: {stats['losses']}
-📦 Trades: {stats['total']}
-""".strip()
 
 # ================= TELEGRAM =================
 async def send(msg):
@@ -179,44 +140,50 @@ async def send(msg):
 # ================= LOOP =================
 async def run():
 
-    await send(f"""
-🚀 LEVEL 8.9 STARTED
-
-🧠 REAL PnL ENGINE ACTIVE
-📊 TRADE TRACKING ON
-🚀 SYMBOL: {SYMBOL}
-""".strip())
-
-    last_report = time.time()
+    await send("🚀 LEVEL 8.9.2 STARTED\n🛡 RISK ENGINE ACTIVE")
 
     while True:
+
+        risk_check()
+
+        if risk_state["trading_paused"]:
+            await send("🛑 TRADING PAUSED (RISK LIMIT HIT)")
+            await asyncio.sleep(60)
+            continue
+
+        if risk_state["cooldown"] > 0:
+            risk_state["cooldown"] -= 1
+            await asyncio.sleep(INTERVAL)
+            continue
 
         closes = get_data()
         price = closes[-1]
 
-        check_trade(price)
+        if active_trade:
+            # check TP/SL
+            t = active_trade
+            if t["side"] == "LONG":
+                if price >= t["tp"] or price <= t["sl"]:
+                    close_trade(price)
+            else:
+                if price <= t["tp"] or price >= t["sl"]:
+                    close_trade(price)
 
-        # open new trade
-        if not active_trade:
+        else:
             sig = signal(closes)
 
             if sig:
                 open_trade(sig, price)
 
                 await send(f"""
-🚨 NEW TRADE (8.9)
+🚨 TRADE OPEN (8.9.2)
 
 🚀 {SYMBOL}
 🟢 {sig}
 
 📍 Entry: {price:.2f}
-🎯 TP/SL ACTIVE
+🛡 Risk Engine ON
 """.strip())
-
-        # periodic report
-        if time.time() - last_report > 300:
-            await send(report())
-            last_report = time.time()
 
         await asyncio.sleep(INTERVAL)
 
