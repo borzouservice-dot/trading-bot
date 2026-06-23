@@ -1,8 +1,9 @@
 import ccxt
 import asyncio
-import time
-import logging
 import pandas as pd
+import numpy as np
+import logging
+import time
 from telegram import Bot
 from telegram.constants import ParseMode
 from dotenv import load_dotenv
@@ -14,7 +15,7 @@ load_dotenv()
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-SYMBOL = "SOL/USDT"
+SYMBOL = "BTC/USDT"
 INTERVAL = 10
 
 bot = Bot(token=TOKEN)
@@ -24,159 +25,128 @@ exchange = ccxt.binance({
     "options": {"defaultType": "spot"}
 })
 
-# ================= LOGGING =================
+# ================= LOG =================
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(message)s"
 )
 
-log = logging.getLogger("LEVEL14")
-
-# ================= STATE =================
-equity = 1000
-risk_per_trade = 0.01  # 1%
-max_drawdown = -0.1    # -10%
-
-positions = []
-
-stats = {
-    "wins": 0,
-    "losses": 0,
-    "total": 0
-}
-
-MAX_POSITIONS = 2
+log = logging.getLogger("LEVEL16")
 
 # ================= DATA =================
-def get_data(tf="1m", limit=100):
-    ohlcv = exchange.fetch_ohlcv(SYMBOL, tf, limit=limit)
-    return pd.DataFrame(ohlcv, columns=["t","o","h","l","c","v"])
+def get_data(limit=120):
+    ohlcv = exchange.fetch_ohlcv(SYMBOL, "1m", limit=limit)
+    df = pd.DataFrame(ohlcv, columns=["t","o","h","l","c","v"])
+    return df
 
 # ================= INDICATORS =================
-def ema(series, n):
-    return series.ewm(span=n).mean()
+def ema(s, n):
+    return s.ewm(span=n).mean()
 
-# ================= SIGNAL =================
-def analyze(df_1m, df_5m):
+def atr(df, period=14):
+    high_low = df["h"] - df["l"]
+    high_close = np.abs(df["h"] - df["c"].shift())
+    low_close = np.abs(df["l"] - df["c"].shift())
 
-    df_1m["ema_fast"] = ema(df_1m["c"], 9)
-    df_1m["ema_slow"] = ema(df_1m["c"], 21)
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    return tr.rolling(period).mean()
 
-    df_5m["ema_fast"] = ema(df_5m["c"], 9)
-    df_5m["ema_slow"] = ema(df_5m["c"], 21)
+def rsi(series, n=14):
+    delta = series.diff()
+    gain = delta.clip(lower=0).rolling(n).mean()
+    loss = -delta.clip(upper=0).rolling(n).mean()
+    rs = gain / (loss + 1e-9)
+    return 100 - (100 / (1 + rs))
 
-    last1 = df_1m.iloc[-1]
-    last5 = df_5m.iloc[-1]
+# ================= MARKET ANALYSIS =================
+def analyze(df):
 
-    trend_1m = last1["ema_fast"] > last1["ema_slow"]
-    trend_5m = last5["ema_fast"] > last5["ema_slow"]
+    df["ema9"] = ema(df["c"], 9)
+    df["ema21"] = ema(df["c"], 21)
+    df["rsi"] = rsi(df["c"], 14)
+    df["atr"] = atr(df)
 
-    price = last1["c"]
+    last = df.iloc[-1]
 
-    if trend_1m and trend_5m:
-        return "LONG", price
+    price = last["c"]
 
-    if not trend_1m and not trend_5m:
-        return "SHORT", price
+    trend_up = last["ema9"] > last["ema21"]
+    trend_down = last["ema9"] < last["ema21"]
 
-    return "HOLD", price
+    rsi_val = last["rsi"]
+    volatility = last["atr"]
 
-# ================= POSITION SIZING =================
-def position_size(price):
+    score = 50
 
-    global equity
+    # trend weight
+    if trend_up:
+        score += 25
+    if trend_down:
+        score -= 25
 
-    risk_amount = equity * risk_per_trade
+    # RSI filter
+    if 40 < rsi_val < 60:
+        score += 10
+    elif rsi_val > 70 or rsi_val < 30:
+        score -= 15
 
-    size = risk_amount / price
-
-    return size
-
-# ================= OPEN POSITION =================
-def open_position(side, price):
-
-    size = position_size(price)
-
-    return {
-        "side": side,
-        "entry": price,
-        "size": size,
-        "tp": price * 1.005,
-        "sl": price * 0.995,
-        "time": time.time()
-    }
-
-# ================= CLOSE =================
-def close_position(pos, price):
-
-    global equity, stats
-
-    pnl = (price - pos["entry"]) * pos["size"] if pos["side"] == "LONG" else (pos["entry"] - price) * pos["size"]
-
-    equity += pnl
-
-    stats["total"] += 1
-
-    if pnl > 0:
-        stats["wins"] += 1
+    # volatility filter
+    if volatility > df["atr"].mean():
+        score -= 10
     else:
-        stats["losses"] += 1
+        score += 5
 
-# ================= RISK CONTROL =================
-def risk_check():
+    # signal decision
+    if score >= 70:
+        signal = "LONG"
+    elif score <= 30:
+        signal = "SHORT"
+    else:
+        signal = "WAIT"
 
-    global equity
+    return signal, score, price, rsi_val, volatility, trend_up
 
-    dd = (equity - 1000) / 1000
+# ================= SIGNAL FORMAT =================
+def format_signal(signal, score, price, rsi, atr_val, trend_up):
 
-    if dd < max_drawdown:
-        return False
+    direction = "🟢 LONG" if signal == "LONG" else "🔴 SHORT" if signal == "SHORT" else "⚪ WAIT"
 
-    return True
+    if signal == "WAIT":
+        return f"""
+📊 {SYMBOL}
 
-# ================= CHECK POSITIONS =================
-def check_positions(price):
+⚪ NO TRADE ZONE
 
-    global positions
+📉 Market is not clear
+🧠 Score: {score}/100
 
-    new = []
+⚡ Waiting for confirmation
+""".strip()
 
-    for p in positions:
-
-        if p["side"] == "LONG":
-            if price >= p["tp"] or price <= p["sl"]:
-                close_position(p, price)
-                continue
-
-        else:
-            if price <= p["tp"] or price >= p["sl"]:
-                close_position(p, price)
-                continue
-
-        new.append(p)
-
-    positions = new
-
-# ================= REPORT =================
-def report():
-
-    wr = (stats["wins"] / stats["total"] * 100) if stats["total"] else 0
+    sl = price - (atr_val * 1.5) if signal == "LONG" else price + (atr_val * 1.5)
+    tp1 = price + (atr_val * 2) if signal == "LONG" else price - (atr_val * 2)
+    tp2 = price + (atr_val * 3) if signal == "LONG" else price - (atr_val * 3)
 
     return f"""
-📊 LEVEL 14 PRO QUANT SYSTEM
+🚀 {SYMBOL}
 
-💰 Equity: {equity:.2f}
-📦 Positions: {len(positions)}
+{direction}
 
-📈 Trades: {stats["total"]}
-🟢 Wins: {stats["wins"]}
-🔴 Losses: {stats["losses"]}
-📊 WinRate: {wr:.2f}%
+📍 Entry: {price:.2f}
+⚖️ Leverage: x1
+🛡 Risk: 0.5% – 1%
 
-⚖️ Risk per trade: {risk_per_trade*100:.1f}%
-📉 Drawdown limit: {max_drawdown*100:.1f}%
+⛔ Stop-Loss: {sl:.2f}
 
-🧠 Mode: MULTI-TIMEFRAME QUANT
+🎯 Targets:
+TP1: {tp1:.2f}
+TP2: {tp2:.2f}
+
+🧠 Confidence: {score}/100
+📉 RSI: {rsi:.2f}
+📊 Volatility: {"High" if atr_val > 0 else "Normal"}
+
+📡 Mode: SAFE PRO SIGNAL ENGINE
 """.strip()
 
 # ================= TELEGRAM =================
@@ -187,81 +157,48 @@ async def send(msg):
         log.error(e)
 
 # ================= START =================
-async def start_msg():
+async def start():
 
-    msg = f"""
-🚀 BOT STARTED
+    await send(f"""
+🚀 LEVEL 16 STARTED
 
-🧠 LEVEL 14 ACTIVE
-📡 MULTI-TIMEFRAME ENGINE
+🧠 SAFE PRO SIGNAL ENGINE ACTIVE
+📊 {SYMBOL}
+⚖️ Leverage Fixed: x1
 
-⚖️ RISK CONTROL ENABLED
-📉 DRAWDOWN PROTECTION ON
-""".strip()
+⚡ Trading Mode: MANUAL ONLY
+""".strip())
 
-    await send(msg)
-    log.info("STARTED")
-
-# ================= MAIN LOOP =================
+# ================= LOOP =================
 async def run():
 
-    await start_msg()
+    await start()
 
-    last_report = time.time()
+    last_signal = None
 
     while True:
 
         try:
 
-            if not risk_check():
-                log.warning("🚨 RISK LIMIT HIT - STOP TRADING")
-                await asyncio.sleep(INTERVAL)
-                continue
+            df = get_data()
 
-            df_1m = get_data("1m")
-            df_5m = get_data("5m")
+            signal, score, price, rsi, atr_val, trend = analyze(df)
 
-            signal, price = analyze(df_1m, df_5m)
+            log.info(f"{signal} | {score} | {price:.2f}")
 
-            check_positions(price)
+            # فقط سیگنال‌های جدید
+            if signal != "WAIT" and signal != last_signal:
 
-            if signal != "HOLD" and len(positions) < MAX_POSITIONS:
-
-                pos = open_position(signal, price)
-                positions.append(pos)
-
-                msg = f"""
-🚨 LEVEL 14 TRADE
-
-🚀 {SYMBOL}
-📊 {signal}
-
-📍 Entry: {price:.2f}
-📦 Size: {pos['size']:.6f}
-
-🎯 TP: {pos['tp']:.2f}
-⛔ SL: {pos['sl']:.2f}
-
-⚖️ Multi-Timeframe CONFIRMED
-""".strip()
-
+                msg = format_signal(signal, score, price, rsi, atr_val, trend)
                 await send(msg)
 
-                log.info(f"{signal} | {price:.2f}")
-
-            else:
-                log.info(f"WAIT | {price:.2f} | Pos: {len(positions)}")
-
-            if time.time() - last_report > 60:
-
-                await send(report())
-                last_report = time.time()
+                last_signal = signal
 
         except Exception as e:
             log.error(f"ERROR: {e}")
 
         await asyncio.sleep(INTERVAL)
 
-# ================= START =================
+# ================= RUN =================
 if __name__ == "__main__":
     asyncio.run(run())
