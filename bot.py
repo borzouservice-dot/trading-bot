@@ -17,7 +17,8 @@ load_dotenv()
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-SYMBOL = "BTC/USDT"
+# 🚀 ONLY SOLANA
+SYMBOL = "SOL/USDT"
 
 INTERVAL = 20
 
@@ -46,7 +47,7 @@ def load_qtable():
         if os.path.exists(QTABLE_PATH) and os.path.getsize(QTABLE_PATH) > 0:
             with open(QTABLE_PATH, "rb") as f:
                 return pickle.load(f)
-    except Exception:
+    except:
         pass
     return {}
 
@@ -56,15 +57,15 @@ def save_qtable():
         with open(tmp, "wb") as f:
             pickle.dump(q_table, f)
         os.replace(tmp, QTABLE_PATH)
-    except Exception as e:
-        log.error(f"Qtable save error: {e}")
+    except:
+        pass
 
 def load_stats():
     try:
         if os.path.exists(STATS_PATH):
             with open(STATS_PATH, "r") as f:
                 return json.load(f)
-    except Exception:
+    except:
         pass
     return {"wins": 0, "losses": 0, "total": 0}
 
@@ -74,8 +75,8 @@ def save_stats():
         with open(tmp, "w") as f:
             json.dump(stats, f, indent=2)
         os.replace(tmp, STATS_PATH)
-    except Exception as e:
-        log.error(f"Stats save error: {e}")
+    except:
+        pass
 
 def log_trade(action, entry, exit_price, profit):
     try:
@@ -94,8 +95,8 @@ def log_trade(action, entry, exit_price, profit):
                 exit_price,
                 profit
             ])
-    except Exception as e:
-        log.error(f"Trade log error: {e}")
+    except:
+        pass
 
 # ================= STATE =================
 q_table = load_qtable()
@@ -128,12 +129,25 @@ def rsi(data, n=14):
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
-# ================= Q-LEARNING =================
+# ================= STATE ENGINE =================
 def get_state(fast, slow, rsi_val):
     trend = 1 if fast > slow else 0
     momentum = 1 if rsi_val > 50 else 0
     return (trend, momentum)
 
+def confidence(fast, slow, rsi_val):
+    score = 0
+
+    if fast > slow:
+        score += 1
+    if rsi_val > 55:
+        score += 1
+    if rsi_val < 70:
+        score += 0.5
+
+    return score / 2.5  # 0 → 1
+
+# ================= Q =================
 def get_q(state, action):
     return q_table.get((state, action), 0.0)
 
@@ -154,8 +168,7 @@ def get_data():
         ohlcv = exchange.fetch_ohlcv(SYMBOL, timeframe="1m", limit=100)
         closes = [c[4] for c in ohlcv]
         return closes
-    except Exception as e:
-        log.error(f"Data error: {e}")
+    except:
         return None
 
 # ================= ENGINE =================
@@ -165,6 +178,12 @@ def ai_engine(price, closes):
     r = rsi(closes, 14)
 
     if None in [fast, slow, r]:
+        return None
+
+    conf = confidence(fast, slow, r)
+
+    # 🔥 FILTER SIGNAL QUALITY
+    if conf < 0.55:
         return None
 
     state = get_state(fast, slow, r)
@@ -177,8 +196,9 @@ def ai_engine(price, closes):
         "state": state,
         "action": action,
         "entry": price,
-        "sl": price * 0.998,
-        "tp": price * 1.002,
+        "sl": price * (0.998 if action == "LONG" else 1.002),
+        "tp": price * (1.003 if action == "LONG" else 0.997),
+        "conf": conf,
         "time": time.time()
     }
 
@@ -196,12 +216,9 @@ def finish_trade(win, price):
 
     log_trade(action, entry, price, profit)
 
-    if win:
-        stats["wins"] += 1
-    else:
-        stats["losses"] += 1
-
     stats["total"] += 1
+    stats["wins"] += 1 if win else 0
+    stats["losses"] += 0 if win else 1
 
     save_qtable()
     save_stats()
@@ -232,8 +249,8 @@ def check_trade(price):
 async def send(msg):
     try:
         await bot.send_message(CHAT_ID, msg, parse_mode=ParseMode.HTML)
-    except Exception as e:
-        log.error(e)
+    except:
+        pass
 
 # ================= LOOP =================
 async def run():
@@ -242,7 +259,7 @@ async def run():
     while True:
         closes = get_data()
 
-        if closes is None:
+        if not closes:
             await asyncio.sleep(5)
             continue
 
@@ -255,13 +272,27 @@ async def run():
 
             if trade:
                 active_trade = trade
-                await send(f"🚨 NEW TRADE\n\n{trade}")
+
+                msg = f"""
+🚨 NEW SOL SIGNAL
+
+🚀 SOL/USDT
+🟢 {trade['action']}
+
+📍 Entry: {trade['entry']:.2f}
+⛔ SL: {trade['sl']:.2f}
+🎯 TP: {trade['tp']:.2f}
+
+🧠 State: {trade['state']}
+📊 Confidence: {trade['conf']:.2f}
+
+🤖 Mode: LEVEL 8.2 AI
+""".strip()
+
+                await send(msg)
 
         await asyncio.sleep(INTERVAL)
 
 # ================= START =================
 if __name__ == "__main__":
-    try:
-        asyncio.run(run())
-    except Exception as e:
-        log.critical(e)
+    asyncio.run(run())
