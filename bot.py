@@ -24,80 +24,61 @@ exchange = ccxt.binance({
 
 # ================= STATE =================
 active_trade = None
+last_signal = None
 
-stats = {
-    "wins": 0,
-    "losses": 0,
-    "total": 0,
-    "equity": 1000
-}
+# ================= DATA =================
+def get_data(timeframe="1m"):
+    ohlcv = exchange.fetch_ohlcv(SYMBOL, timeframe, limit=100)
+    return [c[4] for c in ohlcv]
 
-# 🧠 RISK ENGINE STATE
-risk_state = {
-    "loss_streak": 0,
-    "cooldown": 0,
-    "max_loss_streak": 3,
-    "max_drawdown": 0.90,   # 10% stop
-    "trading_paused": False
-}
-
-# ================= INDICATORS =================
+# ================= INDICATOR =================
 def sma(data, n):
     return sum(data[-n:]) / n if len(data) >= n else None
 
-def rsi(data, n=14):
-    if len(data) < n + 1:
-        return None
-
-    gains, losses = [], []
-
-    for i in range(1, len(data)):
-        diff = data[i] - data[i - 1]
-        gains.append(max(diff, 0))
-        losses.append(max(-diff, 0))
-
-    avg_gain = sum(gains[-n:]) / n
-    avg_loss = sum(losses[-n:]) / n
-
-    if avg_loss == 0:
-        return 100
-
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
-
-# ================= DATA =================
-def get_data():
-    ohlcv = exchange.fetch_ohlcv(SYMBOL, "1m", limit=100)
-    return [c[4] for c in ohlcv]
-
-# ================= SIGNAL =================
-def signal(closes):
+# ================= SINGLE TF SIGNAL =================
+def single_signal(closes):
     fast = sma(closes, 8)
     slow = sma(closes, 21)
-    r = rsi(closes, 14)
 
-    if None in [fast, slow, r]:
+    if fast is None or slow is None:
         return None
 
-    if fast > slow and r < 70:
+    if fast > slow:
         return "LONG"
-
-    if fast < slow and r > 30:
+    elif fast < slow:
         return "SHORT"
-
     return None
 
-# ================= RISK CHECK =================
-def risk_check():
-    global risk_state, stats
+# ================= MULTI TIMEFRAME ENGINE =================
+def get_mtf_signal():
 
-    # 💣 equity protection
-    if stats["equity"] < 1000 * risk_state["max_drawdown"]:
-        risk_state["trading_paused"] = True
+    s1 = single_signal(get_data("1m"))
+    s2 = single_signal(get_data("5m"))
+    s3 = single_signal(get_data("15m"))
 
-    # 💣 loss streak protection
-    if risk_state["loss_streak"] >= risk_state["max_loss_streak"]:
-        risk_state["cooldown"] = 10  # skip cycles
+    signals = [s1, s2, s3]
+
+    long_count = signals.count("LONG")
+    short_count = signals.count("SHORT")
+
+    # 🔥 Confidence logic
+    if long_count == 3:
+        return "LONG", 95
+    if short_count == 3:
+        return "SHORT", 95
+
+    if long_count == 2:
+        return "LONG", 75
+    if short_count == 2:
+        return "SHORT", 75
+
+    if long_count == 1 and short_count == 0:
+        return "LONG", 55
+
+    if short_count == 1 and long_count == 0:
+        return "SHORT", 55
+
+    return None, 0
 
 # ================= TRADE ENGINE =================
 def open_trade(side, price):
@@ -111,24 +92,44 @@ def open_trade(side, price):
     }
 
 def close_trade(price):
-    global active_trade, stats, risk_state
-
-    entry = active_trade["entry"]
-    side = active_trade["side"]
-
-    pnl = (price - entry) if side == "LONG" else (entry - price)
-
-    stats["equity"] += pnl
-    stats["total"] += 1
-
-    if pnl > 0:
-        stats["wins"] += 1
-        risk_state["loss_streak"] = 0
-    else:
-        stats["losses"] += 1
-        risk_state["loss_streak"] += 1
-
+    global active_trade
     active_trade = None
+
+def check_trade(price):
+    global active_trade
+
+    if not active_trade:
+        return
+
+    t = active_trade
+
+    if t["side"] == "LONG":
+        if price >= t["tp"] or price <= t["sl"]:
+            close_trade(price)
+    else:
+        if price <= t["tp"] or price >= t["sl"]:
+            close_trade(price)
+
+# ================= UI FORMAT =================
+def format_signal(symbol, side, price, confidence):
+
+    emoji = "🟢" if side == "LONG" else "🔴"
+
+    bar = "█" * int(confidence / 10)
+
+    return f"""
+🚀 {symbol} SIGNAL (8.9.4 MTF)
+
+{emoji} {side} ENTRY
+
+📍 Entry: {price:.2f}
+📊 Confidence: {confidence}%
+📈 Strength: {bar}
+
+🧠 Timeframes: 1m / 5m / 15m
+
+📦 Status: VALIDATED SIGNAL
+""".strip()
 
 # ================= TELEGRAM =================
 async def send(msg):
@@ -140,50 +141,35 @@ async def send(msg):
 # ================= LOOP =================
 async def run():
 
-    await send("🚀 LEVEL 8.9.2 STARTED\n🛡 RISK ENGINE ACTIVE")
+    global last_signal
+
+    await send("🚀 LEVEL 8.9.4 STARTED\n🧠 MULTI-TIMEFRAME AI ACTIVE")
 
     while True:
 
-        risk_check()
+        closes = get_data("1m")
+        price = closes[-1]
 
-        if risk_state["trading_paused"]:
-            await send("🛑 TRADING PAUSED (RISK LIMIT HIT)")
-            await asyncio.sleep(60)
-            continue
+        check_trade(price)
 
-        if risk_state["cooldown"] > 0:
-            risk_state["cooldown"] -= 1
+        side, confidence = get_mtf_signal()
+
+        # ❌ filter weak signals
+        if confidence < 70:
             await asyncio.sleep(INTERVAL)
             continue
 
-        closes = get_data()
-        price = closes[-1]
+        # 🚫 avoid duplicates
+        if side == last_signal:
+            await asyncio.sleep(INTERVAL)
+            continue
 
-        if active_trade:
-            # check TP/SL
-            t = active_trade
-            if t["side"] == "LONG":
-                if price >= t["tp"] or price <= t["sl"]:
-                    close_trade(price)
-            else:
-                if price <= t["tp"] or price >= t["sl"]:
-                    close_trade(price)
+        if side and not active_trade:
 
-        else:
-            sig = signal(closes)
+            open_trade(side, price)
+            last_signal = side
 
-            if sig:
-                open_trade(sig, price)
-
-                await send(f"""
-🚨 TRADE OPEN (8.9.2)
-
-🚀 {SYMBOL}
-🟢 {sig}
-
-📍 Entry: {price:.2f}
-🛡 Risk Engine ON
-""".strip())
+            await send(format_signal(SYMBOL, side, price, confidence))
 
         await asyncio.sleep(INTERVAL)
 
