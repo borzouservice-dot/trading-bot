@@ -14,7 +14,7 @@ load_dotenv()
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-SYMBOL = "BTC/USDT"
+SYMBOL = "SOL/USDT"
 
 INTERVAL = 20
 STATUS_INTERVAL = 300
