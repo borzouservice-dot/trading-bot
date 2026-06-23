@@ -2,7 +2,6 @@ import ccxt
 import asyncio
 import time
 import logging
-import numpy as np
 import pandas as pd
 from telegram import Bot
 from telegram.constants import ParseMode
@@ -31,63 +30,79 @@ logging.basicConfig(
     format="%(asctime)s | %(message)s"
 )
 
-log = logging.getLogger("LEVEL13")
+log = logging.getLogger("LEVEL14")
 
 # ================= STATE =================
-positions = []
 equity = 1000
+risk_per_trade = 0.01  # 1%
+max_drawdown = -0.1    # -10%
 
-stats = {"wins": 0, "losses": 0, "total": 0}
+positions = []
+
+stats = {
+    "wins": 0,
+    "losses": 0,
+    "total": 0
+}
 
 MAX_POSITIONS = 2
 
 # ================= DATA =================
-def get_data(limit=100):
-    ohlcv = exchange.fetch_ohlcv(SYMBOL, "1m", limit=limit)
-    df = pd.DataFrame(ohlcv, columns=["t","o","h","l","c","v"])
-    return df
+def get_data(tf="1m", limit=100):
+    ohlcv = exchange.fetch_ohlcv(SYMBOL, tf, limit=limit)
+    return pd.DataFrame(ohlcv, columns=["t","o","h","l","c","v"])
 
 # ================= INDICATORS =================
-def ema(series, period):
-    return series.ewm(span=period, adjust=False).mean()
+def ema(series, n):
+    return series.ewm(span=n).mean()
 
-def rsi(series, period=14):
-    delta = series.diff()
-    gain = delta.clip(lower=0).rolling(period).mean()
-    loss = -delta.clip(upper=0).rolling(period).mean()
-    rs = gain / (loss + 1e-9)
-    return 100 - (100 / (1 + rs))
+# ================= SIGNAL =================
+def analyze(df_1m, df_5m):
 
-# ================= SIGNAL ENGINE =================
-def signal_engine(df):
+    df_1m["ema_fast"] = ema(df_1m["c"], 9)
+    df_1m["ema_slow"] = ema(df_1m["c"], 21)
 
-    df["ema_fast"] = ema(df["c"], 9)
-    df["ema_slow"] = ema(df["c"], 21)
-    df["rsi"] = rsi(df["c"], 14)
+    df_5m["ema_fast"] = ema(df_5m["c"], 9)
+    df_5m["ema_slow"] = ema(df_5m["c"], 21)
 
-    latest = df.iloc[-1]
+    last1 = df_1m.iloc[-1]
+    last5 = df_5m.iloc[-1]
 
-    trend_up = latest["ema_fast"] > latest["ema_slow"]
-    trend_down = latest["ema_fast"] < latest["ema_slow"]
+    trend_1m = last1["ema_fast"] > last1["ema_slow"]
+    trend_5m = last5["ema_fast"] > last5["ema_slow"]
 
-    rsi_val = latest["rsi"]
+    price = last1["c"]
 
-    if trend_up and rsi_val < 70:
-        return "LONG", latest["c"]
+    if trend_1m and trend_5m:
+        return "LONG", price
 
-    if trend_down and rsi_val > 30:
-        return "SHORT", latest["c"]
+    if not trend_1m and not trend_5m:
+        return "SHORT", price
 
-    return "HOLD", latest["c"]
+    return "HOLD", price
 
-# ================= POSITION =================
+# ================= POSITION SIZING =================
+def position_size(price):
+
+    global equity
+
+    risk_amount = equity * risk_per_trade
+
+    size = risk_amount / price
+
+    return size
+
+# ================= OPEN POSITION =================
 def open_position(side, price):
+
+    size = position_size(price)
 
     return {
         "side": side,
         "entry": price,
-        "tp": price * 1.004,
-        "sl": price * 0.997,
+        "size": size,
+        "tp": price * 1.005,
+        "sl": price * 0.995,
         "time": time.time()
     }
 
@@ -96,7 +111,7 @@ def close_position(pos, price):
 
     global equity, stats
 
-    pnl = (price - pos["entry"]) if pos["side"] == "LONG" else (pos["entry"] - price)
+    pnl = (price - pos["entry"]) * pos["size"] if pos["side"] == "LONG" else (pos["entry"] - price) * pos["size"]
 
     equity += pnl
 
@@ -107,7 +122,19 @@ def close_position(pos, price):
     else:
         stats["losses"] += 1
 
-# ================= CHECK =================
+# ================= RISK CONTROL =================
+def risk_check():
+
+    global equity
+
+    dd = (equity - 1000) / 1000
+
+    if dd < max_drawdown:
+        return False
+
+    return True
+
+# ================= CHECK POSITIONS =================
 def check_positions(price):
 
     global positions
@@ -136,7 +163,7 @@ def report():
     wr = (stats["wins"] / stats["total"] * 100) if stats["total"] else 0
 
     return f"""
-📊 LEVEL 13 DASHBOARD
+📊 LEVEL 14 PRO QUANT SYSTEM
 
 💰 Equity: {equity:.2f}
 📦 Positions: {len(positions)}
@@ -146,8 +173,10 @@ def report():
 🔴 Losses: {stats["losses"]}
 📊 WinRate: {wr:.2f}%
 
-📡 Strategy: EMA(9/21) + RSI Filter
-⚡ Mode: PRO SIGNAL ENGINE
+⚖️ Risk per trade: {risk_per_trade*100:.1f}%
+📉 Drawdown limit: {max_drawdown*100:.1f}%
+
+🧠 Mode: MULTI-TIMEFRAME QUANT
 """.strip()
 
 # ================= TELEGRAM =================
@@ -163,17 +192,17 @@ async def start_msg():
     msg = f"""
 🚀 BOT STARTED
 
-🧠 LEVEL 13 ACTIVE
-📡 SYMBOL: {SYMBOL}
+🧠 LEVEL 14 ACTIVE
+📡 MULTI-TIMEFRAME ENGINE
 
-📊 EMA + RSI STRATEGY LOADED
-⚡ PRO MODE ENABLED
+⚖️ RISK CONTROL ENABLED
+📉 DRAWDOWN PROTECTION ON
 """.strip()
 
     await send(msg)
     log.info("STARTED")
 
-# ================= LOOP =================
+# ================= MAIN LOOP =================
 async def run():
 
     await start_msg()
@@ -184,30 +213,36 @@ async def run():
 
         try:
 
-            df = get_data()
+            if not risk_check():
+                log.warning("🚨 RISK LIMIT HIT - STOP TRADING")
+                await asyncio.sleep(INTERVAL)
+                continue
 
-            signal, price = signal_engine(df)
+            df_1m = get_data("1m")
+            df_5m = get_data("5m")
+
+            signal, price = analyze(df_1m, df_5m)
 
             check_positions(price)
 
-            # 🚨 filter quality trades
             if signal != "HOLD" and len(positions) < MAX_POSITIONS:
 
                 pos = open_position(signal, price)
                 positions.append(pos)
 
                 msg = f"""
-🚨 NEW TRADE (LEVEL 13)
+🚨 LEVEL 14 TRADE
 
 🚀 {SYMBOL}
 📊 {signal}
 
 📍 Entry: {price:.2f}
+📦 Size: {pos['size']:.6f}
+
 🎯 TP: {pos['tp']:.2f}
 ⛔ SL: {pos['sl']:.2f}
 
-📡 EMA + RSI CONFIRMED
-📦 Positions: {len(positions)}
+⚖️ Multi-Timeframe CONFIRMED
 """.strip()
 
                 await send(msg)
