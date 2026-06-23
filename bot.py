@@ -30,124 +30,124 @@ logging.basicConfig(
     format="%(asctime)s | %(message)s"
 )
 
-log = logging.getLogger("LEVEL20_SNIPER")
+log = logging.getLogger("LEVEL21_AI")
 
 # ================= DATA =================
-def get_data(tf="1m", limit=200):
-    ohlcv = exchange.fetch_ohlcv(SYMBOL, tf, limit=limit)
+def get_data(limit=200):
+    ohlcv = exchange.fetch_ohlcv(SYMBOL, "1m", limit=limit)
     return pd.DataFrame(ohlcv, columns=["t","o","h","l","c","v"])
 
-# ================= STRUCTURE =================
-def levels(df):
+# ================= REGIME DETECTION =================
+def market_regime(df):
 
-    resistance = df["h"].rolling(25).max().iloc[-2]
+    returns = df["c"].pct_change()
+
+    volatility = returns.std()
+
+    trend_strength = abs(df["c"].iloc[-1] - df["c"].iloc[-20]) / df["c"].iloc[-20]
+
+    if volatility < 0.001:
+        return "CHOP"
+
+    if trend_strength > 0.01:
+        return "TREND"
+
+    return "RANGE"
+
+# ================= LIQUIDITY ZONES =================
+def liquidity(df):
+
     support = df["l"].rolling(25).min().iloc[-2]
+    resistance = df["h"].rolling(25).max().iloc[-2]
 
-    price = df["c"].iloc[-1]
+    return support, resistance
 
-    return support, resistance, price
+# ================= MOMENTUM =================
+def momentum(df):
 
-# ================= LIQUIDITY HUNT =================
-def liquidity_hunt(df, support, resistance):
+    body = abs(df["c"] - df["o"])
+    range_size = df["h"] - df["l"]
 
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
+    strength = (body / (range_size + 1e-9)).iloc[-1]
 
-    # sweep low then close above → buy side liquidity grab
-    buy_sweep = last["l"] < support and last["c"] > support
+    return strength
 
-    # sweep high then close below → sell side liquidity grab
-    sell_sweep = last["h"] > resistance and last["c"] < resistance
-
-    return buy_sweep, sell_sweep
-
-# ================= ORDER FLOW (proxy) =================
-def order_flow(df):
-
-    last = df.iloc[-1]
-
-    body = abs(last["c"] - last["o"])
-    candle_range = last["h"] - last["l"]
-
-    strength = body / (candle_range + 1e-9)
-
-    bullish_pressure = last["c"] > last["o"] and strength > 0.6
-    bearish_pressure = last["c"] < last["o"] and strength > 0.6
-
-    return bullish_pressure, bearish_pressure
-
-# ================= SNIPER ENGINE =================
+# ================= AI SCORING ENGINE =================
 def analyze(df):
 
-    support, resistance, price = levels(df)
-
-    buy_sweep, sell_sweep = liquidity_hunt(df, support, resistance)
-    bull_flow, bear_flow = order_flow(df)
+    regime = market_regime(df)
+    sup, res = liquidity(df)
+    price = df["c"].iloc[-1]
+    mom = momentum(df)
 
     score = 50
 
-    # liquidity logic (VERY IMPORTANT)
-    if buy_sweep and bull_flow:
-        score += 40
+    # regime filter (MOST IMPORTANT)
+    if regime == "TREND":
+        score += 25
+    elif regime == "RANGE":
+        score += 10
+    else:
+        score -= 40  # CHOP = NO TRADE ZONE
 
-    if sell_sweep and bear_flow:
-        score -= 40
+    # liquidity positioning
+    if price > res:
+        score += 10
+    if price < sup:
+        score += 10
 
-    # breakout validation
-    if price > resistance and bull_flow:
+    # momentum filter
+    if mom > 0.6:
         score += 15
-
-    if price < support and bear_flow:
-        score -= 15
+    elif mom < 0.3:
+        score -= 10
 
     signal = "WAIT"
-    if score >= 80:
+    if score >= 75:
         signal = "LONG"
-    elif score <= 20:
+    elif score <= 25:
         signal = "SHORT"
 
-    return signal, score, price, support, resistance, buy_sweep, sell_sweep
+    return signal, score, price, sup, res, regime, mom
 
 # ================= FORMAT =================
-def format_signal(signal, score, price, sup, res, buy_sweep, sell_sweep):
+def format_signal(signal, score, price, sup, res, regime, mom):
 
     if signal == "WAIT":
         return f"""
-📊 SOL/USDT
+📊 SOL/USDT (LEVEL 21 AI ENGINE)
 
-⚪ NO SNIPER SETUP
+⚪ NO TRADE ZONE
 
 🧠 Score: {score}/100
+📉 Market Regime: {regime}
 
-💧 Liquidity: Waiting for sweep
-
-⚡ No high-probability entry
+⚠️ Condition: NOT OPTIMAL
+💡 Waiting for clean structure
 """.strip()
 
     direction = "🟢 LONG" if signal == "LONG" else "🔴 SHORT"
 
-    # SNIPER ENTRY ZONE (important change)
-    entry_low = sup if signal == "LONG" else price
-    entry_high = price if signal == "LONG" else res
+    entry_low = sup
+    entry_high = res
 
     sl = sup * 0.995 if signal == "LONG" else res * 1.005
-
-    tp1 = price + abs(price - sup) * 1.5 if signal == "LONG" else price - abs(res - price) * 1.5
-    tp2 = price + abs(price - sup) * 2.5 if signal == "LONG" else price - abs(res - price) * 2.5
+    tp1 = price + abs(price - sup) * 1.3 if signal == "LONG" else price - abs(res - price) * 1.3
+    tp2 = price + abs(price - sup) * 2.2 if signal == "LONG" else price - abs(res - price) * 2.2
 
     return f"""
-🎯 SOL/USDT (LEVEL 20 SNIPER)
+🚀 SOL/USDT (LEVEL 21 AI HEDGE ENGINE)
 
 {direction}
 
-📍 ENTRY ZONE:
+📍 Entry Zone:
 {entry_low:.2f} - {entry_high:.2f}
 
 📊 Support: {sup:.2f}
 📊 Resistance: {res:.2f}
 
-💧 Buy Sweep: {"YES" if buy_sweep else "NO"}
-💧 Sell Sweep: {"YES" if sell_sweep else "NO"}
+🧠 Market Regime: {regime}
+⚡ Momentum: {mom:.2f}
 
 🧠 Confidence: {score}/100
 
@@ -156,8 +156,8 @@ def format_signal(signal, score, price, sup, res, buy_sweep, sell_sweep):
 🎯 TP1: {tp1:.2f}
 🎯 TP2: {tp2:.2f}
 
-📡 Mode: SNIPER SMART MONEY ENGINE
-⚖️ Leverage: x1 (manual only)
+📡 Mode: AI DECISION ENGINE (NO EMOTION)
+⚖️ Leverage: x1
 """.strip()
 
 # ================= TELEGRAM =================
@@ -170,7 +170,7 @@ async def send(msg):
 # ================= LOOP =================
 async def run():
 
-    await send("🎯 LEVEL 20 STARTED\n🧠 SNIPER SMART MONEY ENGINE ACTIVE")
+    await send("🚀 LEVEL 21 STARTED\n🧠 AI MARKET REGIME ENGINE ACTIVE")
 
     last_signal = None
 
@@ -180,14 +180,13 @@ async def run():
 
             df = get_data()
 
-            signal, score, price, sup, res, buy_sweep, sell_sweep = analyze(df)
+            signal, score, price, sup, res, regime, mom = analyze(df)
 
-            log.info(f"{signal} | {score} | {price:.2f}")
+            log.info(f"{signal} | {score} | {price:.2f} | {regime}")
 
-            # VERY STRICT FILTER (important)
             if signal != "WAIT" and signal != last_signal:
 
-                msg = format_signal(signal, score, price, sup, res, buy_sweep, sell_sweep)
+                msg = format_signal(signal, score, price, sup, res, regime, mom)
                 await send(msg)
 
                 last_signal = signal
