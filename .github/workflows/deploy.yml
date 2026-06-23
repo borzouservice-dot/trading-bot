@@ -17,6 +17,5 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
-            cd /root/trading-bot
-            chmod +x update.sh
-            ./update.sh
+              chmod +x /root/update.sh
+              /root/update.sh
