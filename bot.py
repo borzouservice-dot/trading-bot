@@ -1,212 +1,133 @@
-import os
-import time
-import pickle
-import asyncio
-import random
-from dotenv import load_dotenv
-from telegram import Bot
-from telegram.constants import ParseMode
 import ccxt
+import numpy as np
+import pandas as pd
+import asyncio
+import time
+import random
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
 
-# ================= CONFIG =================
-load_dotenv()
-
-TOKEN = os.getenv("TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
-
-SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
-INTERVAL = 10
-
-bot = Bot(token=TOKEN)
-
+# ================= EXCHANGE =================
 exchange = ccxt.binance({
     "enableRateLimit": True,
     "options": {"defaultType": "spot"}
 })
 
-# ================= PERSISTENT Q TABLE =================
-Q_FILE = "qtable.pkl"
+SYMBOL = "SOL/USDT"
 
-def load_q():
-    if os.path.exists(Q_FILE):
-        try:
-            with open(Q_FILE, "rb") as f:
-                return pickle.load(f)
-        except:
-            return {}
-    return {}
+# ================= DATA =================
+def get_ohlcv(limit=500):
+    data = exchange.fetch_ohlcv(SYMBOL, timeframe="1m", limit=limit)
+    df = pd.DataFrame(data, columns=["t","o","h","l","c","v"])
+    return df
 
-def save_q():
-    with open(Q_FILE, "wb") as f:
-        pickle.dump(q_table, f)
+# ================= FEATURES =================
+def create_features(df):
 
-q_table = load_q()
+    df["return"] = df["c"].pct_change()
+    df["volatility"] = df["return"].rolling(10).std()
+    df["momentum"] = df["c"] - df["c"].shift(5)
 
-# ================= STATE =================
-positions = []
-equity = 1000
+    df["rsi"] = compute_rsi(df["c"], 14)
 
-stats = {"wins": 0, "losses": 0, "total": 0}
+    df = df.dropna()
 
-ACTIONS = ["LONG", "SHORT", "HOLD"]
+    X = df[["return","volatility","momentum","rsi"]].values
+    y = (df["c"].shift(-1) > df["c"]).astype(int).values[:-1]
 
-# ================= MARKET =================
-def get_price(symbol):
-    ohlcv = exchange.fetch_ohlcv(symbol, "1m", limit=1)
-    return ohlcv[-1][4]
+    return X[:-1], y[:-1]
 
-# ================= STATE ENCODING =================
-def get_state(price):
-    return (
-        int(price % 2 > 1),
-        int(price % 3 > 1),
-        int(price % 5 > 1)
-    )
+# ================= RSI =================
+def compute_rsi(series, period):
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(period).mean()
 
-# ================= Q =================
-def get_q(state, action):
-    return q_table.get((state, action), 0.0)
+    rs = gain / (loss + 1e-9)
+    return 100 - (100 / (1 + rs))
 
-def choose_action(state):
-    if random.random() < 0.1:
-        return random.choice(ACTIONS)
+# ================= TRAIN MODEL =================
+def train_model(X, y):
 
-    q_vals = [get_q(state, a) for a in ACTIONS]
-    return ACTIONS[q_vals.index(max(q_vals))]
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
 
-def update_q(state, action, reward):
-    old = q_table.get((state, action), 0.0)
-    q_table[(state, action)] = old + 0.1 * (reward - old)
+    model = LogisticRegression()
+    model.fit(X_scaled, y)
 
-# ================= TRADE =================
-def open_trade(symbol, action, price):
-    return {
-        "symbol": symbol,
-        "action": action,
-        "entry": price,
-        "tp": price * (1.003),
-        "sl": price * (0.998),
-        "state": get_state(price)
-    }
+    return model, scaler
 
-def close_trade(trade, price):
-    global equity, stats
+# ================= BACKTEST =================
+def backtest(model, scaler, X, y):
 
-    pnl = (price - trade["entry"]) if trade["action"] == "LONG" else (trade["entry"] - price)
+    X_scaled = scaler.transform(X)
 
-    reward = pnl
+    preds = model.predict(X_scaled)
 
-    update_q(trade["state"], trade["action"], reward)
+    returns = []
 
-    equity += pnl
+    for i in range(len(preds)):
+        if preds[i] == y[i]:
+            returns.append(1)
+        else:
+            returns.append(-1)
 
-    stats["total"] += 1
+    returns = np.array(returns)
 
-    if pnl > 0:
-        stats["wins"] += 1
-    else:
-        stats["losses"] += 1
+    winrate = (returns > 0).mean()
+    sharpe = returns.mean() / (returns.std() + 1e-9)
+    max_dd = min(returns.cumsum())
 
-    save_q()
+    return winrate, sharpe, max_dd
 
-# ================= CHECK =================
-def check_trades():
+# ================= LIVE SIGNAL =================
+def live_signal(model, scaler, latest):
 
-    global positions
+    X = np.array([latest])
+    X_scaled = scaler.transform(X)
 
-    new = []
+    pred = model.predict(X_scaled)[0]
 
-    for p in positions:
+    return "LONG" if pred == 1 else "SHORT"
 
-        price = get_price(p["symbol"])
-
-        if price >= p["tp"] or price <= p["sl"]:
-            close_trade(p, price)
-            continue
-
-        new.append(p)
-
-    positions = new
-
-# ================= BACKTEST (SIMPLE) =================
-def quick_backtest():
-
-    results = []
-
-    for _ in range(50):
-
-        price = random.uniform(50, 100)
-
-        state = get_state(price)
-
-        action = choose_action(state)
-
-        reward = random.uniform(-1, 1)
-
-        update_q(state, action, reward)
-
-        results.append(reward)
-
-    return sum(results)
-
-# ================= REPORT =================
-def report():
-
-    wr = (stats["wins"] / stats["total"] * 100) if stats["total"] > 0 else 0
-
-    return f"""
-📊 LEVEL 11 — HEDGE FUND MODE
-
-💰 Equity: {equity:.2f}
-📦 Positions: {len(positions)}
-
-📈 Trades: {stats["total"]}
-🟢 Wins: {stats["wins"]}
-🔴 Losses: {stats["losses"]}
-📊 WinRate: {wr:.2f}%
-
-🧠 Q-STATES: {len(q_table)}
-
-⚙️ Mode: REINFORCEMENT LEARNING ACTIVE
-""".strip()
-
-# ================= TELEGRAM =================
-async def send(msg):
-    try:
-        await bot.send_message(CHAT_ID, msg, parse_mode=ParseMode.HTML)
-    except:
-        pass
-
-# ================= LOOP =================
+# ================= MAIN =================
 async def run():
 
-    global positions
+    print("🚀 LEVEL 12 STARTED — PRO QUANT SYSTEM")
 
-    await send("🚀 LEVEL 11 STARTED\n🧠 HEDGE FUND RL ENGINE ACTIVE")
+    df = get_ohlcv()
 
-    quick_backtest()
+    X, y = create_features(df)
+
+    model, scaler = train_model(X, y)
+
+    winrate, sharpe, dd = backtest(model, scaler, X, y)
+
+    print("\n📊 BACKTEST RESULTS")
+    print(f"WinRate: {winrate:.2f}")
+    print(f"Sharpe: {sharpe:.2f}")
+    print(f"MaxDrawdown: {dd:.2f}")
 
     while True:
 
-        check_trades()
+        df = get_ohlcv(50)
 
-        for symbol in SYMBOLS:
+        latest = df.iloc[-1]
 
-            price = get_price(symbol)
+        features = [
+            df["c"].pct_change().iloc[-1],
+            df["c"].pct_change().rolling(10).std().iloc[-1],
+            df["c"].iloc[-1] - df["c"].iloc[-5],
+            50  # placeholder RSI simplified
+        ]
 
-            state = get_state(price)
+        signal = live_signal(model, scaler, features)
 
-            action = choose_action(state)
+        price = df["c"].iloc[-1]
 
-            if action != "HOLD" and len(positions) < 5:
+        print(f"📡 SIGNAL: {signal} | Price: {price:.2f}")
 
-                trade = open_trade(symbol, action, price)
-                positions.append(trade)
-
-        if random.random() < 0.3 and positions:
-            positions.pop(0)
-
-        await asyncio.sleep(INTERVAL)
+        await asyncio.sleep(10)
 
 # ================= START =================
 if __name__ == "__main__":
