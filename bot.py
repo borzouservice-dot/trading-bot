@@ -13,7 +13,7 @@ TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 SYMBOL = "SOL/USDT"
-INTERVAL = 20
+INTERVAL = 10  # 🔥 faster for live monitoring
 
 bot = Bot(token=TOKEN)
 
@@ -24,142 +24,70 @@ exchange = ccxt.binance({
 
 # ================= STATE =================
 active_trade = None
-last_signal = None
+last_update_time = 0
 
 # ================= DATA =================
-def get_data():
-    ohlcv = exchange.fetch_ohlcv(SYMBOL, "1m", limit=100)
-    return [c[4] for c in ohlcv]
+def get_price():
+    ohlcv = exchange.fetch_ohlcv(SYMBOL, "1m", limit=1)
+    return ohlcv[-1][4]
 
-# ================= INDICATORS =================
-def sma(data, n):
-    return sum(data[-n:]) / n if len(data) >= n else None
-
-def rsi(data, n=14):
-    if len(data) < n + 1:
-        return None
-
-    gains, losses = [], []
-
-    for i in range(1, len(data)):
-        diff = data[i] - data[i - 1]
-        gains.append(max(diff, 0))
-        losses.append(max(-diff, 0))
-
-    avg_gain = sum(gains[-n:]) / n
-    avg_loss = sum(losses[-n:]) / n
-
-    if avg_loss == 0:
-        return 100
-
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
-
-# ================= SIGNAL =================
-def signal(closes):
-    fast = sma(closes, 8)
-    slow = sma(closes, 21)
-    r = rsi(closes, 14)
-
-    if None in [fast, slow, r]:
-        return None
-
-    if fast > slow and r < 70:
-        return "LONG"
-    if fast < slow and r > 30:
-        return "SHORT"
-
-    return None
-
-# ================= TRADE ENGINE =================
+# ================= TRADE =================
 def open_trade(side, price):
-    global active_trade
-
-    active_trade = {
+    return {
         "side": side,
         "entry": price,
+        "tp1": price * (1.002),
+        "tp2": price * (1.006),
         "sl": price * (0.998 if side == "LONG" else 1.002),
-        "tp1": price * (1.0025 if side == "LONG" else 0.9975),
-        "tp2": price * (1.006 if side == "LONG" else 0.994),
         "trail": None,
         "tp1_hit": False
     }
 
-# ================= TRAILING STOP =================
-def update_trailing(price):
-    global active_trade
+def pnl(trade, price):
+    if trade["side"] == "LONG":
+        return price - trade["entry"]
+    else:
+        return trade["entry"] - price
 
-    if not active_trade:
-        return
-
-    t = active_trade
-
-    if t["side"] == "LONG":
-
-        if price > t["entry"] * 1.002:
-            t["trail"] = price * 0.999
-
-        if t["trail"] and price <= t["trail"]:
-            close_trade()
+# ================= TRAILING =================
+def update_trailing(trade, price):
+    if trade["side"] == "LONG":
+        if price > trade["entry"] * 1.002:
+            trade["trail"] = price * 0.999
 
     else:
+        if price < trade["entry"] * 0.998:
+            trade["trail"] = price * 1.001
 
-        if price < t["entry"] * 0.998:
-            t["trail"] = price * 1.001
+# ================= STATUS =================
+def trade_status(trade, price):
 
-        if t["trail"] and price >= t["trail"]:
-            close_trade()
+    profit = pnl(trade, price)
 
-# ================= EXIT LOGIC =================
-def check_trade(price):
-    global active_trade
+    if profit > 0:
+        status = "IN PROFIT 🟢"
+    elif profit < 0:
+        status = "IN LOSS 🔴"
+    else:
+        status = "BREAK EVEN ⚪"
 
-    if not active_trade:
-        return
-
-    t = active_trade
-
-    # 🟢 TP1 partial
-    if not t["tp1_hit"]:
-        if (t["side"] == "LONG" and price >= t["tp1"]) or \
-           (t["side"] == "SHORT" and price <= t["tp1"]):
-            t["tp1_hit"] = True
-
-    # 🟢 TP2 full exit
-    if (t["side"] == "LONG" and price >= t["tp2"]) or \
-       (t["side"] == "SHORT" and price <= t["tp2"]):
-        close_trade()
-
-    # ⛔ SL exit
-    if (t["side"] == "LONG" and price <= t["sl"]) or \
-       (t["side"] == "SHORT" and price >= t["sl"]):
-        close_trade()
-
-    update_trailing(price)
-
-# ================= CLOSE TRADE =================
-def close_trade():
-    global active_trade
-    active_trade = None
-
-# ================= UI =================
-def format_signal(symbol, side, price):
-
-    emoji = "🟢" if side == "LONG" else "🔴"
+    tp1_progress = abs((price - trade["entry"]) / (trade["tp1"] - trade["entry"])) * 100
 
     return f"""
-🚀 {symbol} SIGNAL (LEVEL 9)
+📊 LIVE TRADE STATUS (9.1)
 
-{emoji} {side} ENTRY
+{trade['side']} {status}
 
-📍 Entry: {price:.2f}
+📍 Entry: {trade['entry']:.2f}
+💰 Price: {price:.2f}
+📈 PnL: {profit:.4f}
 
-🎯 TP1 (partial)
-🎯 TP2 (full)
-⛔ SL active
+🎯 TP1 Progress: {tp1_progress:.1f}%
 
-📈 Trailing Stop: ON
-🧠 Execution Engine ACTIVE
+🛡 SL: {trade['sl']:.2f}
+📉 Trail: {trade['trail'] if trade['trail'] else 'OFF'}
+
+🧠 LIVE EXECUTION MODE
 """.strip()
 
 # ================= TELEGRAM =================
@@ -172,27 +100,35 @@ async def send(msg):
 # ================= LOOP =================
 async def run():
 
-    global last_signal
+    global active_trade, last_update_time
 
-    await send("🚀 LEVEL 9 STARTED\n🧠 EXECUTION INTELLIGENCE ACTIVE")
+    await send("🚀 LEVEL 9.1 STARTED\n📊 LIVE TRADE MONITOR ACTIVE")
 
     while True:
 
-        closes = get_data()
-        price = closes[-1]
+        price = get_price()
 
-        check_trade(price)
-
+        # 🟢 open trade once
         if not active_trade:
+            active_trade = open_trade("LONG", price)
 
-            sig = signal(closes)
+            await send(f"""
+🚨 TRADE OPEN (9.1)
 
-            if sig and sig != last_signal:
+🚀 {SYMBOL}
+🟢 LONG
 
-                open_trade(sig, price)
-                last_signal = sig
+📍 Entry: {price:.2f}
+""".strip())
 
-                await send(format_signal(SYMBOL, sig, price))
+        # 📊 update live every few seconds
+        if active_trade and time.time() - last_update_time > 10:
+
+            update_trailing(active_trade, price)
+
+            await send(trade_status(active_trade, price))
+
+            last_update_time = time.time()
 
         await asyncio.sleep(INTERVAL)
 
