@@ -17,10 +17,11 @@ load_dotenv()
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-# 🚀 ONLY SOLANA
 SYMBOL = "SOL/USDT"
 
 INTERVAL = 20
+
+HEARTBEAT_INTERVAL = 300  # 5 minutes
 
 DATA_DIR = "data"
 QTABLE_PATH = f"{DATA_DIR}/qtable.pkl"
@@ -32,6 +33,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
+
 log = logging.getLogger(__name__)
 
 bot = Bot(token=TOKEN)
@@ -40,6 +42,9 @@ exchange = ccxt.binance({
     "enableRateLimit": True,
     "options": {"defaultType": "spot"}
 })
+
+# ================= HEARTBEAT =================
+last_heartbeat = 0
 
 # ================= SAFE STORAGE =================
 def load_qtable():
@@ -129,7 +134,7 @@ def rsi(data, n=14):
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
-# ================= STATE ENGINE =================
+# ================= ENGINE =================
 def get_state(fast, slow, rsi_val):
     trend = 1 if fast > slow else 0
     momentum = 1 if rsi_val > 50 else 0
@@ -137,17 +142,12 @@ def get_state(fast, slow, rsi_val):
 
 def confidence(fast, slow, rsi_val):
     score = 0
-
     if fast > slow:
         score += 1
-    if rsi_val > 55:
+    if 50 < rsi_val < 70:
         score += 1
-    if rsi_val < 70:
-        score += 0.5
+    return score / 2
 
-    return score / 2.5  # 0 → 1
-
-# ================= Q =================
 def get_q(state, action):
     return q_table.get((state, action), 0.0)
 
@@ -166,8 +166,7 @@ def update_q(state, action, reward, alpha=0.1):
 def get_data():
     try:
         ohlcv = exchange.fetch_ohlcv(SYMBOL, timeframe="1m", limit=100)
-        closes = [c[4] for c in ohlcv]
-        return closes
+        return [c[4] for c in ohlcv]
     except:
         return None
 
@@ -182,7 +181,6 @@ def ai_engine(price, closes):
 
     conf = confidence(fast, slow, r)
 
-    # 🔥 FILTER SIGNAL QUALITY
     if conf < 0.55:
         return None
 
@@ -218,7 +216,7 @@ def finish_trade(win, price):
 
     stats["total"] += 1
     stats["wins"] += 1 if win else 0
-    stats["losses"] += 0 if win else 1
+    stats["losses"] += 1 if not win else 0
 
     save_qtable()
     save_stats()
@@ -254,11 +252,24 @@ async def send(msg):
 
 # ================= LOOP =================
 async def run():
-    global active_trade
+    global active_trade, last_heartbeat
+
+    # 🚀 STARTUP MESSAGE
+    await send(f"""
+🚀 BOT STARTED
+
+🧠 LEVEL 8.3 ACTIVE
+🚀 SYMBOL: {SYMBOL}
+
+📡 SYSTEM ONLINE
+⚡ READY FOR SIGNALS
+""".strip())
+
+    last_heartbeat = time.time()
 
     while True:
-        closes = get_data()
 
+        closes = get_data()
         if not closes:
             await asyncio.sleep(5)
             continue
@@ -267,6 +278,7 @@ async def run():
 
         check_trade(price)
 
+        # 🚨 TRADE GENERATION
         if not active_trade:
             trade = ai_engine(price, closes)
 
@@ -276,7 +288,7 @@ async def run():
                 msg = f"""
 🚨 NEW SOL SIGNAL
 
-🚀 SOL/USDT
+🚀 {SYMBOL}
 🟢 {trade['action']}
 
 📍 Entry: {trade['entry']:.2f}
@@ -286,10 +298,26 @@ async def run():
 🧠 State: {trade['state']}
 📊 Confidence: {trade['conf']:.2f}
 
-🤖 Mode: LEVEL 8.2 AI
+🤖 LEVEL 8.3
 """.strip()
 
                 await send(msg)
+
+        # 💓 HEARTBEAT
+        now = time.time()
+        if now - last_heartbeat > HEARTBEAT_INTERVAL:
+
+            await send(f"""
+💓 HEARTBEAT
+
+🚀 Bot: ACTIVE
+🧠 Mode: LEVEL 8.3
+🚀 Symbol: {SYMBOL}
+
+⏱ Time: {time.strftime('%H:%M:%S')}
+""".strip())
+
+            last_heartbeat = now
 
         await asyncio.sleep(INTERVAL)
 
