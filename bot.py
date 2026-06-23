@@ -227,7 +227,7 @@ def format_signal(t):
     emoji = "🟢" if t["action"] == "LONG" else "🔴"
 
     return f"""
-🚀 BTC/USDT
+🚀 SOL/USDT
 
 {emoji} {t['action']} (RL AGENT)
 
