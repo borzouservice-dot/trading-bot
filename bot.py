@@ -14,7 +14,7 @@ load_dotenv()
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-SYMBOLS = ["BTC/USDT"]
+SYMBOL = "BTC/USDT"
 
 INTERVAL = 20
 STATUS_INTERVAL = 300
@@ -27,14 +27,14 @@ ATR_PERIOD = 14
 # ================= LOGGING =================
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
+    format="%(asctime)s | %(levelname)s | %(message)s",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler("trading_bot.log", encoding="utf-8")
+        logging.FileHandler("bot.log", encoding="utf-8")
     ]
 )
 
-logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
 bot = Bot(token=TOKEN)
 
@@ -44,27 +44,17 @@ exchange = ccxt.binance({
 })
 
 # ================= STATE =================
-price_history = {s: [] for s in SYMBOLS}
-high_history = {s: [] for s in SYMBOLS}
-low_history = {s: [] for s in SYMBOLS}
+active_trades = []
+stats = {"wins": 0, "losses": 0, "total": 0}
 
-active_signals = []
-
-stats = {
-    "wins": 0,
-    "losses": 0,
-    "total": 0
-}
 
 # ================= INDICATORS =================
-def sma(data, period):
-    if len(data) < period:
-        return None
-    return sum(data[-period:]) / period
+def sma(data, n):
+    return sum(data[-n:]) / n if len(data) >= n else None
 
 
-def rsi(data, period=14):
-    if len(data) < period + 1:
+def rsi(data, n=14):
+    if len(data) < n + 1:
         return None
 
     gains, losses = [], []
@@ -74,8 +64,8 @@ def rsi(data, period=14):
         gains.append(max(diff, 0))
         losses.append(max(-diff, 0))
 
-    avg_gain = sum(gains[-period:]) / period
-    avg_loss = sum(losses[-period:]) / period
+    avg_gain = sum(gains[-n:]) / n
+    avg_loss = sum(losses[-n:]) / n
 
     if avg_loss == 0:
         return 100
@@ -84,86 +74,79 @@ def rsi(data, period=14):
     return 100 - (100 / (1 + rs))
 
 
-def atr(highs, lows, closes, period=14):
-    if len(closes) < period + 1:
+def atr(highs, lows, closes, n=14):
+    if len(closes) < n + 1:
         return None
 
     trs = []
-
     for i in range(1, len(closes)):
-        tr = max(
+        trs.append(max(
             highs[i] - lows[i],
             abs(highs[i] - closes[i - 1]),
             abs(lows[i] - closes[i - 1])
-        )
-        trs.append(tr)
+        ))
 
-    return sum(trs[-period:]) / period
-
-
-# ================= PRICE =================
-def get_ohlcv(symbol):
-    try:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe="1m", limit=100)
-        closes = [c[4] for c in ohlcv]
-        highs = [c[2] for c in ohlcv]
-        lows = [c[3] for c in ohlcv]
-        return closes, highs, lows
-    except Exception as e:
-        logger.error(f"OHLCV error: {e}")
-        return None, None, None
+    return sum(trs[-n:]) / n
 
 
-# ================= SIGNAL ENGINE =================
-def generate_signal(symbol, price, rsi_val, atr_val, fast_ma, slow_ma):
+# ================= DATA =================
+def get_data():
+    ohlcv = exchange.fetch_ohlcv(SYMBOL, timeframe="1m", limit=100)
 
-    # ❌ بازار رنج → سیگنال نده
-    if abs(fast_ma - slow_ma) < atr_val * 0.2:
+    closes = [c[4] for c in ohlcv]
+    highs = [c[2] for c in ohlcv]
+    lows = [c[3] for c in ohlcv]
+
+    return closes, highs, lows
+
+
+# ================= STRATEGY =================
+def signal_engine(price, closes, highs, lows):
+
+    fast = sma(closes, MA_FAST)
+    slow = sma(closes, MA_SLOW)
+    r = rsi(closes, RSI_PERIOD)
+    a = atr(highs, lows, closes, ATR_PERIOD)
+
+    if None in [fast, slow, r, a]:
+        return None
+
+    # ❌ بازار رنج = هیچ سیگنال
+    if abs(fast - slow) < a * 0.25:
         return None
 
     # 🟢 LONG
-    if fast_ma > slow_ma and rsi_val < 70:
+    if fast > slow and r < 70:
 
-        sl = price - atr_val * 1.5
+        sl = price - (a * 1.5)
+        tp = [price + a, price + a * 2, price + a * 3]
 
-        tp = [
-            price + atr_val * 1,
-            price + atr_val * 2,
-            price + atr_val * 3,
-        ]
-
-        return {
-            "symbol": symbol,
-            "direction": "LONG",
-            "entry": price,
-            "sl": sl,
-            "tp": tp,
-            "confidence": 0.8,
-            "rsi": rsi_val
-        }
+        return build_signal(price, "LONG", r, sl, tp)
 
     # 🔴 SHORT
-    if fast_ma < slow_ma and rsi_val > 30:
+    if fast < slow and r > 30:
 
-        sl = price + atr_val * 1.5
+        sl = price + (a * 1.5)
+        tp = [price - a, price - a * 2, price - a * 3]
 
-        tp = [
-            price - atr_val * 1,
-            price - atr_val * 2,
-            price - atr_val * 3,
-        ]
-
-        return {
-            "symbol": symbol,
-            "direction": "SHORT",
-            "entry": price,
-            "sl": sl,
-            "tp": tp,
-            "confidence": 0.8,
-            "rsi": rsi_val
-        }
+        return build_signal(price, "SHORT", r, sl, tp)
 
     return None
+
+
+def build_signal(price, direction, rsi_val, sl, tp):
+
+    return {
+        "symbol": SYMBOL,
+        "direction": direction,
+        "entry": price,
+        "rsi": rsi_val,
+        "sl": sl,
+        "tp": tp,
+        "confidence": 0.8,
+        "status": "OPEN",
+        "time": time.time()
+    }
 
 
 # ================= FORMAT =================
@@ -179,9 +162,9 @@ def format_signal(s):
         tp_text += f"• TP{i}: {t:.2f} ({rr:.1f}R)\n"
 
     return f"""
-🚀 {s['symbol']}
+🚀 BTC/USDT
 
-{emoji} {s['direction']} PRO SIGNAL
+{emoji} {s['direction']} SIGNAL
 
 📍 Entry: {s['entry']:.2f}
 📊 RSI: {s['rsi']:.1f}
@@ -193,117 +176,103 @@ def format_signal(s):
 🎯 Take Profits:
 {tp_text}
 ━━━━━━━━━━━━━━━
-🧠 Engine: ATR + Trend Filter
-⚡ Mode: PRO SCALPING
+🧠 Engine: ATR + Trend Filter + RSI
+⚡ Mode: FINAL PRO SYSTEM
 🕒 {datetime.utcnow().strftime('%H:%M UTC')}
 """.strip()
 
 
-# ================= PERFORMANCE =================
-def check_signals(price):
+# ================= TRACKING =================
+def check_trades(price):
 
     global stats
 
-    for s in active_signals:
-        if s["status"] != "OPEN":
+    for t in active_trades:
+
+        if t["status"] != "OPEN":
             continue
 
-        if s["direction"] == "LONG":
+        if t["direction"] == "LONG":
 
-            if price >= s["tp"][0]:
-                s["status"] = "WIN"
+            if price >= t["tp"][0]:
+                t["status"] = "WIN"
                 stats["wins"] += 1
                 stats["total"] += 1
 
-            elif price <= s["sl"]:
-                s["status"] = "LOSS"
+            elif price <= t["sl"]:
+                t["status"] = "LOSS"
                 stats["losses"] += 1
                 stats["total"] += 1
 
         else:
 
-            if price <= s["tp"][0]:
-                s["status"] = "WIN"
+            if price <= t["tp"][0]:
+                t["status"] = "WIN"
                 stats["wins"] += 1
                 stats["total"] += 1
 
-            elif price >= s["sl"]:
-                s["status"] = "LOSS"
+            elif price >= t["sl"]:
+                t["status"] = "LOSS"
                 stats["losses"] += 1
                 stats["total"] += 1
 
 
-def performance_report():
+def report():
 
     if stats["total"] == 0:
         return "📊 No trades yet"
 
-    winrate = (stats["wins"] / stats["total"]) * 100
+    wr = (stats["wins"] / stats["total"]) * 100
 
     return f"""
-📊 PERFORMANCE REPORT
+📊 PERFORMANCE
 
 ✅ Wins: {stats['wins']}
 ❌ Losses: {stats['losses']}
-📈 Win Rate: {winrate:.2f}%
+📈 WinRate: {wr:.2f}%
 
-📦 Total Trades: {stats['total']}
+📦 Trades: {stats['total']}
 """.strip()
 
 
 # ================= TELEGRAM =================
-async def send(text):
+async def send(msg):
     try:
-        await bot.send_message(chat_id=CHAT_ID, text=text, parse_mode=ParseMode.HTML)
+        await bot.send_message(CHAT_ID, msg, parse_mode=ParseMode.HTML)
     except Exception as e:
-        logger.error(f"Telegram error: {e}")
+        log.error(e)
 
 
-# ================= MAIN LOOP =================
+# ================= LOOP =================
 async def run():
 
-    await send("🚀 PRO Bot ONLINE (BTC ONLY)\n🧠 ATR + Trend Engine ACTIVE")
+    await send("🚀 FINAL PRO BOT ONLINE\n🧠 BTC Engine Active")
 
-    last_status = time.time()
+    last_report = time.time()
 
     while True:
 
-        closes, highs, lows = get_ohlcv("BTC/USDT")
-
-        if not closes:
-            await asyncio.sleep(INTERVAL)
-            continue
+        closes, highs, lows = get_data()
 
         price = closes[-1]
 
-        fast_ma = sma(closes, MA_FAST)
-        slow_ma = sma(closes, MA_SLOW)
-        rsi_val = rsi(closes, RSI_PERIOD)
-        atr_val = atr(highs, lows, closes, ATR_PERIOD)
+        check_trades(price)
 
-        if None in [fast_ma, slow_ma, rsi_val, atr_val]:
-            await asyncio.sleep(INTERVAL)
-            continue
-
-        # check active trades
-        check_signals(price)
-
-        signal = generate_signal("BTC/USDT", price, rsi_val, atr_val, fast_ma, slow_ma)
+        signal = signal_engine(price, closes, highs, lows)
 
         if signal:
 
-            active_signals.append({
-                **signal,
-                "status": "OPEN",
-                "time": time.time()
-            })
+            active_trades.append(signal)
 
             msg = format_signal(signal)
-            await send(f"🚨 NEW PRO SIGNAL\n\n{msg}")
 
-        if time.time() - last_status > STATUS_INTERVAL:
-            await send(performance_report())
-            last_status = time.time()
+            await send(f"🚨 SIGNAL\n\n{msg}")
+
+        if time.time() - last_report > STATUS_INTERVAL:
+
+            await send(report())
+
+            last_report = time.time()
 
         await asyncio.sleep(INTERVAL)
 
@@ -313,4 +282,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(run())
     except Exception as e:
-        logger.critical(f"Fatal error: {e}")
+        log.critical(e)
