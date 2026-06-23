@@ -20,7 +20,6 @@ CHAT_ID = os.getenv("CHAT_ID")
 SYMBOL = "BTC/USDT"
 
 INTERVAL = 20
-STATUS_INTERVAL = 300
 
 DATA_DIR = "data"
 QTABLE_PATH = f"{DATA_DIR}/qtable.pkl"
@@ -32,7 +31,6 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
-
 log = logging.getLogger(__name__)
 
 bot = Bot(token=TOKEN)
@@ -42,48 +40,67 @@ exchange = ccxt.binance({
     "options": {"defaultType": "spot"}
 })
 
-# ================= LOAD DATA =================
+# ================= SAFE STORAGE =================
 def load_qtable():
-    if os.path.exists(QTABLE_PATH):
-        with open(QTABLE_PATH, "rb") as f:
-            return pickle.load(f)
+    try:
+        if os.path.exists(QTABLE_PATH) and os.path.getsize(QTABLE_PATH) > 0:
+            with open(QTABLE_PATH, "rb") as f:
+                return pickle.load(f)
+    except Exception:
+        pass
     return {}
 
 def save_qtable():
-    with open(QTABLE_PATH, "wb") as f:
-        pickle.dump(q_table, f)
+    try:
+        tmp = QTABLE_PATH + ".tmp"
+        with open(tmp, "wb") as f:
+            pickle.dump(q_table, f)
+        os.replace(tmp, QTABLE_PATH)
+    except Exception as e:
+        log.error(f"Qtable save error: {e}")
 
 def load_stats():
-    if os.path.exists(STATS_PATH):
-        with open(STATS_PATH, "r") as f:
-            return json.load(f)
+    try:
+        if os.path.exists(STATS_PATH):
+            with open(STATS_PATH, "r") as f:
+                return json.load(f)
+    except Exception:
+        pass
     return {"wins": 0, "losses": 0, "total": 0}
 
 def save_stats():
-    with open(STATS_PATH, "w") as f:
-        json.dump(stats, f, indent=2)
+    try:
+        tmp = STATS_PATH + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(stats, f, indent=2)
+        os.replace(tmp, STATS_PATH)
+    except Exception as e:
+        log.error(f"Stats save error: {e}")
 
 def log_trade(action, entry, exit_price, profit):
-    file_exists = os.path.exists(TRADES_PATH)
+    try:
+        file_exists = os.path.exists(TRADES_PATH)
 
-    with open(TRADES_PATH, "a", newline="") as f:
-        writer = csv.writer(f)
+        with open(TRADES_PATH, "a", newline="") as f:
+            writer = csv.writer(f)
 
-        if not file_exists:
-            writer.writerow(["time", "action", "entry", "exit", "profit"])
+            if not file_exists:
+                writer.writerow(["time", "action", "entry", "exit", "profit"])
 
-        writer.writerow([
-            time.strftime("%Y-%m-%d %H:%M:%S"),
-            action,
-            entry,
-            exit_price,
-            profit
-        ])
+            writer.writerow([
+                time.strftime("%Y-%m-%d %H:%M:%S"),
+                action,
+                entry,
+                exit_price,
+                profit
+            ])
+    except Exception as e:
+        log.error(f"Trade log error: {e}")
 
 # ================= STATE =================
 q_table = load_qtable()
-active_trade = None
 stats = load_stats()
+active_trade = None
 
 ACTIONS = ["LONG", "SHORT", "HOLD"]
 
@@ -120,8 +137,8 @@ def get_state(fast, slow, rsi_val):
 def get_q(state, action):
     return q_table.get((state, action), 0.0)
 
-def choose_action(state, epsilon=0.1):
-    if random.random() < epsilon:
+def choose_action(state):
+    if random.random() < 0.1:
         return random.choice(ACTIONS)
 
     qs = [get_q(state, a) for a in ACTIONS]
@@ -133,13 +150,13 @@ def update_q(state, action, reward, alpha=0.1):
 
 # ================= DATA =================
 def get_data():
-    ohlcv = exchange.fetch_ohlcv(SYMBOL, timeframe="1m", limit=100)
-    closes = [c[4] for c in ohlcv]
-    return closes
-
-# ================= REWARD =================
-def reward_fn(win, profit):
-    return profit if win else -profit
+    try:
+        ohlcv = exchange.fetch_ohlcv(SYMBOL, timeframe="1m", limit=100)
+        closes = [c[4] for c in ohlcv]
+        return closes
+    except Exception as e:
+        log.error(f"Data error: {e}")
+        return None
 
 # ================= ENGINE =================
 def ai_engine(price, closes):
@@ -156,21 +173,43 @@ def ai_engine(price, closes):
     if action == "HOLD":
         return None
 
-    sl = price * 0.998
-    tp = price * 1.002 if action == "LONG" else price * 0.998
-
     return {
         "state": state,
         "action": action,
         "entry": price,
-        "sl": sl,
-        "tp": tp,
+        "sl": price * 0.998,
+        "tp": price * 1.002,
         "time": time.time()
     }
 
 # ================= TRADE =================
-def check_trade(price):
+def finish_trade(win, price):
     global active_trade, stats
+
+    entry = active_trade["entry"]
+    action = active_trade["action"]
+
+    profit = abs(price - entry)
+
+    reward = profit if win else -profit
+    update_q(active_trade["state"], action, reward)
+
+    log_trade(action, entry, price, profit)
+
+    if win:
+        stats["wins"] += 1
+    else:
+        stats["losses"] += 1
+
+    stats["total"] += 1
+
+    save_qtable()
+    save_stats()
+
+    active_trade = None
+
+def check_trade(price):
+    global active_trade
 
     if not active_trade:
         return
@@ -189,49 +228,6 @@ def check_trade(price):
         elif price >= t["sl"]:
             finish_trade(False, price)
 
-def finish_trade(win, price):
-    global active_trade, stats
-
-    entry = active_trade["entry"]
-    action = active_trade["action"]
-
-    profit = abs(price - entry)
-    reward = reward_fn(win, profit)
-
-    update_q(active_trade["state"], action, reward)
-
-    log_trade(action, entry, price, profit)
-
-    if win:
-        stats["wins"] += 1
-    else:
-        stats["losses"] += 1
-
-    stats["total"] += 1
-
-    save_qtable()
-    save_stats()
-
-    active_trade = None
-
-# ================= REPORT =================
-def report():
-    if stats["total"] == 0:
-        return "📊 No trades yet"
-
-    wr = (stats["wins"] / stats["total"]) * 100
-
-    return f"""
-📊 LEVEL 8 REPORT
-
-✅ Wins: {stats['wins']}
-❌ Losses: {stats['losses']}
-📈 WinRate: {wr:.2f}%
-
-📦 Trades: {stats['total']}
-🧠 Q-States: {len(q_table)}
-""".strip()
-
 # ================= TELEGRAM =================
 async def send(msg):
     try:
@@ -243,13 +239,13 @@ async def send(msg):
 async def run():
     global active_trade
 
-    await send("🚀 LEVEL 8 BOT ONLINE\n🧠 Smart Q-Learning + Persistent Memory")
-
-    last_report = time.time()
-
     while True:
-
         closes = get_data()
+
+        if closes is None:
+            await asyncio.sleep(5)
+            continue
+
         price = closes[-1]
 
         check_trade(price)
@@ -261,12 +257,7 @@ async def run():
                 active_trade = trade
                 await send(f"🚨 NEW TRADE\n\n{trade}")
 
-        if time.time() - last_report > STATUS_INTERVAL:
-            await send(report())
-            last_report = time.time()
-
         await asyncio.sleep(INTERVAL)
-
 
 # ================= START =================
 if __name__ == "__main__":
