@@ -14,7 +14,7 @@ load_dotenv()
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-SYMBOL = "SOL/USDT"
+SYMBOLS = ["SOL/USDT", "BTC/USDT", "ETH/USDT"]
 INTERVAL = 10
 
 bot = Bot(token=TOKEN)
@@ -30,135 +30,113 @@ logging.basicConfig(
     format="%(asctime)s | %(message)s"
 )
 
-log = logging.getLogger("LEVEL21_AI")
+log = logging.getLogger("LEVEL22")
 
 # ================= DATA =================
-def get_data(limit=200):
-    ohlcv = exchange.fetch_ohlcv(SYMBOL, "1m", limit=limit)
+def get_data(symbol, limit=150):
+    ohlcv = exchange.fetch_ohlcv(symbol, "1m", limit=limit)
     return pd.DataFrame(ohlcv, columns=["t","o","h","l","c","v"])
 
-# ================= REGIME DETECTION =================
-def market_regime(df):
+# ================= SIMPLE STRATEGY CORE =================
+def strategy_score(df):
+
+    price = df["c"].iloc[-1]
+
+    ema_fast = df["c"].ewm(span=9).mean().iloc[-1]
+    ema_slow = df["c"].ewm(span=21).mean().iloc[-1]
 
     returns = df["c"].pct_change()
-
-    volatility = returns.std()
-
-    trend_strength = abs(df["c"].iloc[-1] - df["c"].iloc[-20]) / df["c"].iloc[-20]
-
-    if volatility < 0.001:
-        return "CHOP"
-
-    if trend_strength > 0.01:
-        return "TREND"
-
-    return "RANGE"
-
-# ================= LIQUIDITY ZONES =================
-def liquidity(df):
-
-    support = df["l"].rolling(25).min().iloc[-2]
-    resistance = df["h"].rolling(25).max().iloc[-2]
-
-    return support, resistance
-
-# ================= MOMENTUM =================
-def momentum(df):
-
-    body = abs(df["c"] - df["o"])
-    range_size = df["h"] - df["l"]
-
-    strength = (body / (range_size + 1e-9)).iloc[-1]
-
-    return strength
-
-# ================= AI SCORING ENGINE =================
-def analyze(df):
-
-    regime = market_regime(df)
-    sup, res = liquidity(df)
-    price = df["c"].iloc[-1]
-    mom = momentum(df)
+    vol = returns.std()
 
     score = 50
 
-    # regime filter (MOST IMPORTANT)
-    if regime == "TREND":
-        score += 25
-    elif regime == "RANGE":
+    if ema_fast > ema_slow:
+        score += 20
+    else:
+        score -= 20
+
+    if vol < 0.002:
         score += 10
     else:
-        score -= 40  # CHOP = NO TRADE ZONE
-
-    # liquidity positioning
-    if price > res:
-        score += 10
-    if price < sup:
-        score += 10
-
-    # momentum filter
-    if mom > 0.6:
-        score += 15
-    elif mom < 0.3:
         score -= 10
 
-    signal = "WAIT"
-    if score >= 75:
-        signal = "LONG"
-    elif score <= 25:
-        signal = "SHORT"
+    if price > df["h"].rolling(20).mean().iloc[-1]:
+        score += 10
 
-    return signal, score, price, sup, res, regime, mom
+    if price < df["l"].rolling(20).mean().iloc[-1]:
+        score -= 10
+
+    if score >= 70:
+        signal = "LONG"
+    elif score <= 30:
+        signal = "SHORT"
+    else:
+        signal = "WAIT"
+
+    return signal, score, price
+
+# ================= BACKTEST LIGHT (rolling win estimate) =================
+def pseudo_backtest(df):
+
+    closes = df["c"]
+    returns = closes.pct_change()
+
+    win_rate = (returns > 0).rolling(20).mean().iloc[-1]
+
+    return float(win_rate)
+
+# ================= ANALYZE ALL SYMBOLS =================
+def analyze_all():
+
+    results = []
+
+    for symbol in SYMBOLS:
+
+        df = get_data(symbol)
+
+        signal, score, price = strategy_score(df)
+        win_rate = pseudo_backtest(df)
+
+        results.append({
+            "symbol": symbol,
+            "signal": signal,
+            "score": score,
+            "price": price,
+            "win_rate": win_rate
+        })
+
+    return sorted(results, key=lambda x: x["score"], reverse=True)
 
 # ================= FORMAT =================
-def format_signal(signal, score, price, sup, res, regime, mom):
+def format_report(best, all_results):
 
-    if signal == "WAIT":
-        return f"""
-📊 SOL/USDT (LEVEL 21 AI ENGINE)
+    msg = f"""
+🚀 LEVEL 22 AI PORTFOLIO ENGINE
 
-⚪ NO TRADE ZONE
+🏆 BEST SETUP:
+{best['symbol']}
 
-🧠 Score: {score}/100
-📉 Market Regime: {regime}
+{ "🟢 LONG" if best['signal']=="LONG" else "🔴 SHORT" if best['signal']=="SHORT" else "⚪ WAIT" }
 
-⚠️ Condition: NOT OPTIMAL
-💡 Waiting for clean structure
-""".strip()
+📍 Price: {best['price']:.2f}
+🧠 Score: {best['score']}/100
+📊 Win Est: {best['win_rate']:.2f}
 
-    direction = "🟢 LONG" if signal == "LONG" else "🔴 SHORT"
+------------------------
 
-    entry_low = sup
-    entry_high = res
+📊 ALL MARKETS:
 
-    sl = sup * 0.995 if signal == "LONG" else res * 1.005
-    tp1 = price + abs(price - sup) * 1.3 if signal == "LONG" else price - abs(res - price) * 1.3
-    tp2 = price + abs(price - sup) * 2.2 if signal == "LONG" else price - abs(res - price) * 2.2
+"""
 
-    return f"""
-🚀 SOL/USDT (LEVEL 21 AI HEDGE ENGINE)
+    for r in all_results:
+        msg += f"""
+• {r['symbol']}
+  ➜ {r['signal']} | {r['score']} | WR:{r['win_rate']:.2f}
+"""
 
-{direction}
+    msg += "\n📡 Mode: PORTFOLIO AI DECISION ENGINE"
 
-📍 Entry Zone:
-{entry_low:.2f} - {entry_high:.2f}
-
-📊 Support: {sup:.2f}
-📊 Resistance: {res:.2f}
-
-🧠 Market Regime: {regime}
-⚡ Momentum: {mom:.2f}
-
-🧠 Confidence: {score}/100
-
-⛔ SL: {sl:.2f}
-
-🎯 TP1: {tp1:.2f}
-🎯 TP2: {tp2:.2f}
-
-📡 Mode: AI DECISION ENGINE (NO EMOTION)
-⚖️ Leverage: x1
-""".strip()
+    return msg.strip()
 
 # ================= TELEGRAM =================
 async def send(msg):
@@ -170,26 +148,25 @@ async def send(msg):
 # ================= LOOP =================
 async def run():
 
-    await send("🚀 LEVEL 21 STARTED\n🧠 AI MARKET REGIME ENGINE ACTIVE")
+    await send("🚀 LEVEL 22 STARTED\n🧠 MULTI-ASSET AI PORTFOLIO ENGINE")
 
-    last_signal = None
+    last_best = None
 
     while True:
 
         try:
 
-            df = get_data()
+            results = analyze_all()
+            best = results[0]
 
-            signal, score, price, sup, res, regime, mom = analyze(df)
+            log.info(f"BEST: {best['symbol']} | {best['score']}")
 
-            log.info(f"{signal} | {score} | {price:.2f} | {regime}")
+            if last_best != best["symbol"]:
 
-            if signal != "WAIT" and signal != last_signal:
-
-                msg = format_signal(signal, score, price, sup, res, regime, mom)
+                msg = format_report(best, results)
                 await send(msg)
 
-                last_signal = signal
+                last_best = best["symbol"]
 
         except Exception as e:
             log.error(f"ERROR: {e}")
