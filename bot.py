@@ -1,5 +1,6 @@
 import os
 import time
+import pickle
 import asyncio
 import random
 from dotenv import load_dotenv
@@ -13,7 +14,7 @@ load_dotenv()
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-ASSETS = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
+SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
 INTERVAL = 10
 
 bot = Bot(token=TOKEN)
@@ -23,68 +24,79 @@ exchange = ccxt.binance({
     "options": {"defaultType": "spot"}
 })
 
+# ================= PERSISTENT Q TABLE =================
+Q_FILE = "qtable.pkl"
+
+def load_q():
+    if os.path.exists(Q_FILE):
+        try:
+            with open(Q_FILE, "rb") as f:
+                return pickle.load(f)
+        except:
+            return {}
+    return {}
+
+def save_q():
+    with open(Q_FILE, "wb") as f:
+        pickle.dump(q_table, f)
+
+q_table = load_q()
+
 # ================= STATE =================
 positions = []
 equity = 1000
 
-stats = {
-    "wins": 0,
-    "losses": 0,
-    "total": 0
-}
+stats = {"wins": 0, "losses": 0, "total": 0}
 
-# ================= DATA =================
+ACTIONS = ["LONG", "SHORT", "HOLD"]
+
+# ================= MARKET =================
 def get_price(symbol):
     ohlcv = exchange.fetch_ohlcv(symbol, "1m", limit=1)
     return ohlcv[-1][4]
 
-# ================= SIGNAL SCORE =================
-def signal_score(price):
+# ================= STATE ENCODING =================
+def get_state(price):
+    return (
+        int(price % 2 > 1),
+        int(price % 3 > 1),
+        int(price % 5 > 1)
+    )
 
-    # fake but structured scoring engine
-    trend = random.uniform(0, 1)
-    rsi_score = random.uniform(0, 1)
-    vol = random.uniform(0, 1)
+# ================= Q =================
+def get_q(state, action):
+    return q_table.get((state, action), 0.0)
 
-    score = (trend * 0.5) + (rsi_score * 0.3) + (vol * 0.2)
+def choose_action(state):
+    if random.random() < 0.1:
+        return random.choice(ACTIONS)
 
-    return score
+    q_vals = [get_q(state, a) for a in ACTIONS]
+    return ACTIONS[q_vals.index(max(q_vals))]
 
-# ================= CHOOSE BEST ASSET =================
-def best_asset():
+def update_q(state, action, reward):
+    old = q_table.get((state, action), 0.0)
+    q_table[(state, action)] = old + 0.1 * (reward - old)
 
-    best = None
-    best_score = 0
-
-    for asset in ASSETS:
-
-        price = get_price(asset)
-        score = signal_score(price)
-
-        if score > best_score:
-            best_score = score
-            best = asset
-
-    return best, best_score
-
-# ================= POSITION =================
-def open_position(symbol, price, score):
-
+# ================= TRADE =================
+def open_trade(symbol, action, price):
     return {
         "symbol": symbol,
-        "side": "LONG" if score > 0.5 else "SHORT",
+        "action": action,
         "entry": price,
-        "tp": price * 1.003,
-        "sl": price * 0.998,
-        "score": score
+        "tp": price * (1.003),
+        "sl": price * (0.998),
+        "state": get_state(price)
     }
 
-# ================= CLOSE =================
-def close_position(pos, price):
-
+def close_trade(trade, price):
     global equity, stats
 
-    pnl = (price - pos["entry"]) if pos["side"] == "LONG" else (pos["entry"] - price)
+    pnl = (price - trade["entry"]) if trade["action"] == "LONG" else (trade["entry"] - price)
+
+    reward = pnl
+
+    update_q(trade["state"], trade["action"], reward)
 
     equity += pnl
 
@@ -95,8 +107,10 @@ def close_position(pos, price):
     else:
         stats["losses"] += 1
 
+    save_q()
+
 # ================= CHECK =================
-def check_positions():
+def check_trades():
 
     global positions
 
@@ -106,19 +120,34 @@ def check_positions():
 
         price = get_price(p["symbol"])
 
-        if p["side"] == "LONG":
-            if price >= p["tp"] or price <= p["sl"]:
-                close_position(p, price)
-                continue
-
-        else:
-            if price <= p["tp"] or price >= p["sl"]:
-                close_position(p, price)
-                continue
+        if price >= p["tp"] or price <= p["sl"]:
+            close_trade(p, price)
+            continue
 
         new.append(p)
 
     positions = new
+
+# ================= BACKTEST (SIMPLE) =================
+def quick_backtest():
+
+    results = []
+
+    for _ in range(50):
+
+        price = random.uniform(50, 100)
+
+        state = get_state(price)
+
+        action = choose_action(state)
+
+        reward = random.uniform(-1, 1)
+
+        update_q(state, action, reward)
+
+        results.append(reward)
+
+    return sum(results)
 
 # ================= REPORT =================
 def report():
@@ -126,7 +155,7 @@ def report():
     wr = (stats["wins"] / stats["total"] * 100) if stats["total"] > 0 else 0
 
     return f"""
-📊 LEVEL 10 MULTI-ASSET SYSTEM
+📊 LEVEL 11 — HEDGE FUND MODE
 
 💰 Equity: {equity:.2f}
 📦 Positions: {len(positions)}
@@ -136,8 +165,9 @@ def report():
 🔴 Losses: {stats["losses"]}
 📊 WinRate: {wr:.2f}%
 
-🧠 Assets: {", ".join(ASSETS)}
-⚖️ Mode: MULTI-ASSET AI SCORING
+🧠 Q-STATES: {len(q_table)}
+
+⚙️ Mode: REINFORCEMENT LEARNING ACTIVE
 """.strip()
 
 # ================= TELEGRAM =================
@@ -152,37 +182,29 @@ async def run():
 
     global positions
 
-    await send("🚀 LEVEL 10 STARTED\n🧠 MULTI-ASSET QUANT SYSTEM ACTIVE")
+    await send("🚀 LEVEL 11 STARTED\n🧠 HEDGE FUND RL ENGINE ACTIVE")
 
-    last_report = time.time()
+    quick_backtest()
 
     while True:
 
-        check_positions()
+        check_trades()
 
-        # 🧠 choose best opportunity
-        asset, score = best_asset()
+        for symbol in SYMBOLS:
 
-        if score > 0.65 and len(positions) < 3:
+            price = get_price(symbol)
 
-            price = get_price(asset)
+            state = get_state(price)
 
-            positions.append(open_position(asset, price, score))
+            action = choose_action(state)
 
-            await send(f"""
-🚨 NEW MULTI-ASSET TRADE
+            if action != "HOLD" and len(positions) < 5:
 
-🚀 {asset}
-📊 Score: {score:.2f}
+                trade = open_trade(symbol, action, price)
+                positions.append(trade)
 
-📍 Entry: {price:.2f}
-🧠 AI SELECTED THIS ASSET
-""".strip())
-
-        if time.time() - last_report > 60:
-
-            await send(report())
-            last_report = time.time()
+        if random.random() < 0.3 and positions:
+            positions.pop(0)
 
         await asyncio.sleep(INTERVAL)
 
