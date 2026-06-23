@@ -1,178 +1,108 @@
 import ccxt
-import asyncio
 import pandas as pd
 import numpy as np
 import logging
-from telegram import Bot
-from telegram.constants import ParseMode
-from dotenv import load_dotenv
-import os
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import train_test_split
+import matplotlib.pyplot as plt
 
 # ================= CONFIG =================
-load_dotenv()
-
-TOKEN = os.getenv("TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
-
-SYMBOLS = ["SOL/USDT", "BTC/USDT", "ETH/USDT"]
-INTERVAL = 10
-
-bot = Bot(token=TOKEN)
+SYMBOL = "SOL/USDT"
+TIMEFRAME = "1m"
 
 exchange = ccxt.binance({
     "enableRateLimit": True,
     "options": {"defaultType": "spot"}
 })
 
-# ================= LOG =================
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(message)s"
-)
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("LEVEL23")
 
-log = logging.getLogger("LEVEL22")
+# ================= LOAD DATA =================
+def load_data(limit=1000):
+    ohlcv = exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=limit)
+    df = pd.DataFrame(ohlcv, columns=["t","o","h","l","c","v"])
+    return df
 
-# ================= DATA =================
-def get_data(symbol, limit=150):
-    ohlcv = exchange.fetch_ohlcv(symbol, "1m", limit=limit)
-    return pd.DataFrame(ohlcv, columns=["t","o","h","l","c","v"])
+# ================= FEATURES =================
+def create_features(df):
 
-# ================= SIMPLE STRATEGY CORE =================
-def strategy_score(df):
+    df["ret"] = df["c"].pct_change()
+    df["ema9"] = df["c"].ewm(span=9).mean()
+    df["ema21"] = df["c"].ewm(span=21).mean()
+    df["vol"] = df["ret"].rolling(10).std()
 
-    price = df["c"].iloc[-1]
+    df["target"] = np.where(df["c"].shift(-1) > df["c"], 1, 0)
 
-    ema_fast = df["c"].ewm(span=9).mean().iloc[-1]
-    ema_slow = df["c"].ewm(span=21).mean().iloc[-1]
+    df = df.dropna()
 
-    returns = df["c"].pct_change()
-    vol = returns.std()
+    features = df[["ema9","ema21","vol"]]
+    labels = df["target"]
 
-    score = 50
+    return features, labels, df
 
-    if ema_fast > ema_slow:
-        score += 20
-    else:
-        score -= 20
+# ================= TRAIN MODEL =================
+def train_model(X, y):
 
-    if vol < 0.002:
-        score += 10
-    else:
-        score -= 10
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
 
-    if price > df["h"].rolling(20).mean().iloc[-1]:
-        score += 10
+    model = LogisticRegression()
+    model.fit(X_train, y_train)
 
-    if price < df["l"].rolling(20).mean().iloc[-1]:
-        score -= 10
+    acc = model.score(X_test, y_test)
 
-    if score >= 70:
-        signal = "LONG"
-    elif score <= 30:
-        signal = "SHORT"
-    else:
-        signal = "WAIT"
+    log.info(f"MODEL ACCURACY: {acc:.2f}")
 
-    return signal, score, price
+    return model, X_test, y_test
 
-# ================= BACKTEST LIGHT (rolling win estimate) =================
-def pseudo_backtest(df):
+# ================= BACKTEST =================
+def backtest(model, X_test, df_test):
 
-    closes = df["c"]
-    returns = closes.pct_change()
+    preds = model.predict(X_test)
 
-    win_rate = (returns > 0).rolling(20).mean().iloc[-1]
+    df_test = df_test.iloc[-len(preds):].copy()
+    df_test["pred"] = preds
 
-    return float(win_rate)
+    df_test["strategy_ret"] = df_test["pred"] * df_test["ret"].shift(-1)
 
-# ================= ANALYZE ALL SYMBOLS =================
-def analyze_all():
+    equity = (1 + df_test["strategy_ret"].fillna(0)).cumprod()
 
-    results = []
+    return df_test, equity
 
-    for symbol in SYMBOLS:
+# ================= METRICS =================
+def metrics(df_test):
 
-        df = get_data(symbol)
+    total_return = df_test["strategy_ret"].sum()
 
-        signal, score, price = strategy_score(df)
-        win_rate = pseudo_backtest(df)
+    winrate = (df_test["strategy_ret"] > 0).mean()
 
-        results.append({
-            "symbol": symbol,
-            "signal": signal,
-            "score": score,
-            "price": price,
-            "win_rate": win_rate
-        })
+    max_dd = (df_test["strategy_ret"].cumsum() - df_test["strategy_ret"].cumsum().cummax()).min()
 
-    return sorted(results, key=lambda x: x["score"], reverse=True)
+    return total_return, winrate, max_dd
 
-# ================= FORMAT =================
-def format_report(best, all_results):
+# ================= RUN =================
+def run():
 
-    msg = f"""
-🚀 LEVEL 22 AI PORTFOLIO ENGINE
+    df = load_data()
 
-🏆 BEST SETUP:
-{best['symbol']}
+    X, y, df_clean = create_features(df)
 
-{ "🟢 LONG" if best['signal']=="LONG" else "🔴 SHORT" if best['signal']=="SHORT" else "⚪ WAIT" }
+    model, X_test, y_test = train_model(X, y)
 
-📍 Price: {best['price']:.2f}
-🧠 Score: {best['score']}/100
-📊 Win Est: {best['win_rate']:.2f}
+    df_test, equity = backtest(model, X_test, df_clean)
 
-------------------------
+    total_return, winrate, max_dd = metrics(df_test)
 
-📊 ALL MARKETS:
+    print("\n🚀 LEVEL 23 BACKTEST RESULTS")
+    print(f"Return: {total_return:.2f}")
+    print(f"WinRate: {winrate:.2f}")
+    print(f"Max Drawdown: {max_dd:.2f}")
 
-"""
-
-    for r in all_results:
-        msg += f"""
-• {r['symbol']}
-  ➜ {r['signal']} | {r['score']} | WR:{r['win_rate']:.2f}
-"""
-
-    msg += "\n📡 Mode: PORTFOLIO AI DECISION ENGINE"
-
-    return msg.strip()
-
-# ================= TELEGRAM =================
-async def send(msg):
-    try:
-        await bot.send_message(CHAT_ID, msg, parse_mode=ParseMode.HTML)
-    except Exception as e:
-        log.error(e)
-
-# ================= LOOP =================
-async def run():
-
-    await send("🚀 LEVEL 22 STARTED\n🧠 MULTI-ASSET AI PORTFOLIO ENGINE")
-
-    last_best = None
-
-    while True:
-
-        try:
-
-            results = analyze_all()
-            best = results[0]
-
-            log.info(f"BEST: {best['symbol']} | {best['score']}")
-
-            if last_best != best["symbol"]:
-
-                msg = format_report(best, results)
-                await send(msg)
-
-                last_best = best["symbol"]
-
-        except Exception as e:
-            log.error(f"ERROR: {e}")
-
-        await asyncio.sleep(INTERVAL)
+    # equity curve
+    plt.plot(equity.values)
+    plt.title("Equity Curve - LEVEL 23")
+    plt.show()
 
 # ================= START =================
 if __name__ == "__main__":
-    asyncio.run(run())
+    run()
