@@ -1,6 +1,7 @@
 import os
 import time
 import asyncio
+import csv
 from dotenv import load_dotenv
 from telegram import Bot
 from telegram.constants import ParseMode
@@ -24,8 +25,15 @@ exchange = ccxt.binance({
 
 # ================= STATE =================
 active_trade = None
-last_signal = None
-cooldown = 0
+
+stats = {
+    "wins": 0,
+    "losses": 0,
+    "total": 0,
+    "equity": 1000
+}
+
+TRADE_FILE = "trades.csv"
 
 # ================= INDICATORS =================
 def sma(data, n):
@@ -73,13 +81,6 @@ def signal(closes):
 
     return None
 
-# ================= TELEGRAM =================
-async def send(msg):
-    try:
-        await bot.send_message(CHAT_ID, msg, parse_mode=ParseMode.HTML)
-    except:
-        pass
-
 # ================= TRADE ENGINE =================
 def open_trade(side, price):
     global active_trade
@@ -91,9 +92,44 @@ def open_trade(side, price):
         "sl": price * (0.998 if side == "LONG" else 1.002)
     }
 
-def close_trade():
-    global active_trade
+def close_trade(price):
+    global active_trade, stats
+
+    entry = active_trade["entry"]
+    side = active_trade["side"]
+
+    # 📊 PnL calculation
+    pnl = (price - entry) if side == "LONG" else (entry - price)
+
+    stats["equity"] += pnl
+    stats["total"] += 1
+
+    if pnl > 0:
+        stats["wins"] += 1
+    else:
+        stats["losses"] += 1
+
+    # 💾 log trade
+    write_trade(side, entry, price, pnl)
+
     active_trade = None
+
+def write_trade(side, entry, exit_price, pnl):
+    file_exists = os.path.isfile(TRADE_FILE)
+
+    with open(TRADE_FILE, "a", newline="") as f:
+        writer = csv.writer(f)
+
+        if not file_exists:
+            writer.writerow(["time", "side", "entry", "exit", "pnl"])
+
+        writer.writerow([
+            time.strftime("%Y-%m-%d %H:%M:%S"),
+            side,
+            entry,
+            exit_price,
+            pnl
+        ])
 
 def check_trade(price):
     global active_trade
@@ -105,63 +141,82 @@ def check_trade(price):
 
     if t["side"] == "LONG":
         if price >= t["tp"]:
-            close_trade()
+            close_trade(price)
         elif price <= t["sl"]:
-            close_trade()
+            close_trade(price)
 
     elif t["side"] == "SHORT":
         if price <= t["tp"]:
-            close_trade()
+            close_trade(price)
         elif price >= t["sl"]:
-            close_trade()
+            close_trade(price)
+
+# ================= REPORT =================
+def report():
+    if stats["total"] == 0:
+        return "📊 No trades yet"
+
+    winrate = (stats["wins"] / stats["total"]) * 100
+
+    return f"""
+📊 PERFORMANCE REPORT (LEVEL 8.9)
+
+💰 Equity: {stats['equity']:.2f}
+📈 Winrate: {winrate:.2f}%
+
+✅ Wins: {stats['wins']}
+❌ Losses: {stats['losses']}
+📦 Trades: {stats['total']}
+""".strip()
+
+# ================= TELEGRAM =================
+async def send(msg):
+    try:
+        await bot.send_message(CHAT_ID, msg, parse_mode=ParseMode.HTML)
+    except:
+        pass
 
 # ================= LOOP =================
 async def run():
 
-    global last_signal, cooldown
+    await send(f"""
+🚀 LEVEL 8.9 STARTED
 
-    await send("🚀 LEVEL 8.8 STARTED\n🧠 TRADE MEMORY ACTIVE")
+🧠 REAL PnL ENGINE ACTIVE
+📊 TRADE TRACKING ON
+🚀 SYMBOL: {SYMBOL}
+""".strip())
+
+    last_report = time.time()
 
     while True:
 
         closes = get_data()
         price = closes[-1]
 
-        # 💣 check open trade first
         check_trade(price)
 
-        # 🟢 cooldown logic
-        if cooldown > 0:
-            cooldown -= 1
-            await asyncio.sleep(INTERVAL)
-            continue
+        # open new trade
+        if not active_trade:
+            sig = signal(closes)
 
-        # 🧠 generate signal
-        sig = signal(closes)
+            if sig:
+                open_trade(sig, price)
 
-        # 🚫 no duplicate signal
-        if sig == last_signal:
-            await asyncio.sleep(INTERVAL)
-            continue
-
-        # 🚀 open trade only if none active
-        if sig and not active_trade:
-
-            open_trade(sig, price)
-            last_signal = sig
-            cooldown = 3
-
-            await send(f"""
-🚨 NEW TRADE (8.8)
+                await send(f"""
+🚨 NEW TRADE (8.9)
 
 🚀 {SYMBOL}
 🟢 {sig}
 
 📍 Entry: {price:.2f}
 🎯 TP/SL ACTIVE
-
-🧠 TRADE LOCKED
 """.strip())
+
+        # periodic report
+        if time.time() - last_report > 300:
+            await send(report())
+            last_report = time.time()
 
         await asyncio.sleep(INTERVAL)
 
