@@ -1,6 +1,7 @@
 import os
 import time
 import asyncio
+import random
 from dotenv import load_dotenv
 from telegram import Bot
 from telegram.constants import ParseMode
@@ -15,6 +16,9 @@ CHAT_ID = os.getenv("CHAT_ID")
 SYMBOL = "SOL/USDT"
 INTERVAL = 10
 
+FEE_RATE = 0.001  # 0.1% fee (binance spot approx)
+SLIPPAGE = 0.0005  # 0.05%
+
 bot = Bot(token=TOKEN)
 
 exchange = ccxt.binance({
@@ -24,83 +28,60 @@ exchange = ccxt.binance({
 
 # ================= STATE =================
 equity = 1000
-
-stats = {
-    "wins": 0,
-    "losses": 0,
-    "total": 0
-}
-
 positions = []
-
-# ================= RISK ENGINE =================
-def get_winrate():
-    if stats["total"] == 0:
-        return 0.5
-    return stats["wins"] / stats["total"]
-
-def risk_per_trade():
-    wr = get_winrate()
-
-    # 🧠 adaptive risk logic
-    if wr > 0.6:
-        return 0.02   # 2% aggressive
-    elif wr > 0.45:
-        return 0.01   # 1% normal
-    else:
-        return 0.005  # 0.5% safe
-
-def position_size():
-    risk = risk_per_trade()
-    return equity * risk
+stats = {"wins": 0, "losses": 0, "total": 0}
 
 # ================= PRICE =================
 def get_price():
     ohlcv = exchange.fetch_ohlcv(SYMBOL, "1m", limit=1)
-    return ohlcv[-1][4]
+    base_price = ohlcv[-1][4]
+
+    # 📉 market noise simulation
+    noise = random.uniform(-0.0003, 0.0003)
+    return base_price * (1 + noise)
+
+# ================= EXECUTION ENGINE =================
+def apply_slippage(price, side):
+
+    if side == "LONG":
+        return price * (1 + SLIPPAGE)
+    else:
+        return price * (1 - SLIPPAGE)
 
 # ================= POSITION =================
 def open_position(side, price):
 
-    size = position_size()
+    exec_price = apply_slippage(price, side)
 
     return {
         "side": side,
-        "entry": price,
-        "tp": price * (1.003),
-        "sl": price * (0.998),
-        "size": size,
+        "entry": exec_price,
+        "tp": exec_price * (1.003),
+        "sl": exec_price * (0.998),
         "open_time": time.time()
     }
 
-# ================= CLOSE =================
+# ================= CLOSE POSITION =================
 def close_position(pos, price):
 
     global equity, stats
 
-    pnl = (price - pos["entry"]) if pos["side"] == "LONG" else (pos["entry"] - price)
+    exec_price = apply_slippage(price, pos["side"])
 
-    equity += pnl
+    pnl = (exec_price - pos["entry"]) if pos["side"] == "LONG" else (pos["entry"] - exec_price)
+
+    fee = (pos["entry"] + exec_price) * FEE_RATE
+
+    net_pnl = pnl - fee
+
+    equity += net_pnl
 
     stats["total"] += 1
 
-    if pnl > 0:
+    if net_pnl > 0:
         stats["wins"] += 1
     else:
         stats["losses"] += 1
-
-# ================= DRAWDOWN CONTROL =================
-def risk_guard():
-
-    wr = get_winrate()
-
-    if equity < 800:   # hard stop
-        return False
-
-    if wr < 0.3 and stats["total"] > 10:
-        return False
-
-    return True
 
 # ================= CHECK =================
 def check_positions(price):
@@ -115,6 +96,7 @@ def check_positions(price):
             if price >= p["tp"] or price <= p["sl"]:
                 close_position(p, price)
                 continue
+
         else:
             if price <= p["tp"] or price >= p["sl"]:
                 close_position(p, price)
@@ -127,19 +109,22 @@ def check_positions(price):
 # ================= REPORT =================
 def report():
 
-    wr = get_winrate() * 100
+    wr = (stats["wins"] / stats["total"] * 100) if stats["total"] > 0 else 0
 
     return f"""
-📊 LEVEL 9.3 RISK ENGINE
+📊 LEVEL 9.4 EXECUTION ENGINE
 
 💰 Equity: {equity:.2f}
 📦 Positions: {len(positions)}
 
-📈 WinRate: {wr:.2f}%
-📊 Trades: {stats["total"]}
+📈 Trades: {stats["total"]}
+🟢 Wins: {stats["wins"]}
+🔴 Losses: {stats["losses"]}
+📊 WinRate: {wr:.2f}%
 
-🧠 Risk per trade: {risk_per_trade()*100:.2f}%
-⚖️ Mode: ADAPTIVE RISK
+💸 Fee included: {FEE_RATE*100:.2f}%
+📉 Slippage model: ACTIVE
+🧠 MARKET REALISM ON
 """.strip()
 
 # ================= TELEGRAM =================
@@ -154,16 +139,11 @@ async def run():
 
     global positions
 
-    await send("🚀 LEVEL 9.3 STARTED\n🧠 ADAPTIVE RISK ENGINE ACTIVE")
+    await send("🚀 LEVEL 9.4 STARTED\n📉 EXECUTION + MARKET REALISM ACTIVE")
 
     last_report = time.time()
 
     while True:
-
-        if not risk_guard():
-            await send("🛑 RISK LIMIT ACTIVE - TRADING PAUSED")
-            await asyncio.sleep(30)
-            continue
 
         price = get_price()
 
@@ -172,19 +152,19 @@ async def run():
         # 🟢 open positions
         if len(positions) < 2:
 
-            side = "LONG" if price % 2 > 1 else "SHORT"
+            side = "LONG" if random.random() > 0.5 else "SHORT"
 
             positions.append(open_position(side, price))
 
             await send(f"""
-🚨 NEW POSITION (9.3)
+🚨 NEW EXECUTION (9.4)
 
 🚀 {SYMBOL}
 {side}
 
-📍 Entry: {price:.2f}
-📦 Size: {position_size():.2f} USDT
-⚖️ Risk: {risk_per_trade()*100:.2f}%
+📍 Market Price: {price:.2f}
+📉 Slippage: {SLIPPAGE*100:.2f}%
+💸 Fee: {FEE_RATE*100:.2f}%
 """.strip())
 
         # 📊 report
