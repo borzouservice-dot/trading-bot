@@ -3,6 +3,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import time
 
 # =========================
 # CONFIG
@@ -126,12 +127,10 @@ def train(agent):
 
 
 # =========================
-# SIMULATED MARKET
+# FAKE MARKET DATA
 # =========================
-def fake_market():
-
-    price = 100 + random.randint(-5, 5)
-    return price
+def fake_price(last_price):
+    return last_price + random.randint(-3, 3)
 
 
 # =========================
@@ -141,7 +140,7 @@ def run():
 
     agent = Agent()
 
-    closes = []
+    closes = [100]
     position = None
 
     entry_price = 0
@@ -151,7 +150,7 @@ def run():
 
     while True:
 
-        price = fake_market()
+        price = fake_price(closes[-1])
         closes.append(price)
 
         if len(closes) > 100:
@@ -184,8 +183,6 @@ def run():
 
             position = None
 
-        # slow loop
-        import time
         time.sleep(1)
 
 
