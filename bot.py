@@ -3,9 +3,18 @@ import numpy as np
 import pandas as pd
 import asyncio
 import time
-import random
+import logging
+
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
+
+# ================= LOGGING =================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(message)s"
+)
+
+log = logging.getLogger()
 
 # ================= EXCHANGE =================
 exchange = ccxt.binance({
@@ -16,116 +25,88 @@ exchange = ccxt.binance({
 SYMBOL = "SOL/USDT"
 
 # ================= DATA =================
-def get_ohlcv(limit=500):
-    data = exchange.fetch_ohlcv(SYMBOL, timeframe="1m", limit=limit)
+def get_ohlcv(limit=200):
+    data = exchange.fetch_ohlcv(SYMBOL, "1m", limit=limit)
     df = pd.DataFrame(data, columns=["t","o","h","l","c","v"])
     return df
 
 # ================= FEATURES =================
-def create_features(df):
+def build_features(df):
 
-    df["return"] = df["c"].pct_change()
-    df["volatility"] = df["return"].rolling(10).std()
-    df["momentum"] = df["c"] - df["c"].shift(5)
+    df = df.copy()
 
-    df["rsi"] = compute_rsi(df["c"], 14)
+    df["ret"] = df["c"].pct_change()
+    df["vol"] = df["ret"].rolling(10).std()
+    df["mom"] = df["c"] - df["c"].shift(5)
 
     df = df.dropna()
 
-    X = df[["return","volatility","momentum","rsi"]].values
+    X = df[["ret","vol","mom"]].values
     y = (df["c"].shift(-1) > df["c"]).astype(int).values[:-1]
 
     return X[:-1], y[:-1]
 
-# ================= RSI =================
-def compute_rsi(series, period):
-    delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(period).mean()
-
-    rs = gain / (loss + 1e-9)
-    return 100 - (100 / (1 + rs))
-
-# ================= TRAIN MODEL =================
-def train_model(X, y):
+# ================= TRAIN =================
+def train(X, y):
 
     scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
+    Xs = scaler.fit_transform(X)
 
     model = LogisticRegression()
-    model.fit(X_scaled, y)
+    model.fit(Xs, y)
 
     return model, scaler
 
-# ================= BACKTEST =================
-def backtest(model, scaler, X, y):
+# ================= LIVE FEATURES SAFE =================
+def live_features(df):
 
-    X_scaled = scaler.transform(X)
+    ret = df["c"].pct_change().iloc[-1]
+    vol = df["c"].pct_change().rolling(10).std().iloc[-1]
+    mom = df["c"].iloc[-1] - df["c"].iloc[-5]
 
-    preds = model.predict(X_scaled)
+    # 🧠 FIX NaN
+    if np.isnan(ret): ret = 0
+    if np.isnan(vol): vol = 0
+    if np.isnan(mom): mom = 0
 
-    returns = []
-
-    for i in range(len(preds)):
-        if preds[i] == y[i]:
-            returns.append(1)
-        else:
-            returns.append(-1)
-
-    returns = np.array(returns)
-
-    winrate = (returns > 0).mean()
-    sharpe = returns.mean() / (returns.std() + 1e-9)
-    max_dd = min(returns.cumsum())
-
-    return winrate, sharpe, max_dd
-
-# ================= LIVE SIGNAL =================
-def live_signal(model, scaler, latest):
-
-    X = np.array([latest])
-    X_scaled = scaler.transform(X)
-
-    pred = model.predict(X_scaled)[0]
-
-    return "LONG" if pred == 1 else "SHORT"
+    return np.array([ret, vol, mom]).reshape(1, -1)
 
 # ================= MAIN =================
 async def run():
 
-    print("🚀 LEVEL 12 STARTED — PRO QUANT SYSTEM")
+    log.info("🚀 LEVEL 12 FIXED STARTED")
 
     df = get_ohlcv()
 
-    X, y = create_features(df)
+    X, y = build_features(df)
 
-    model, scaler = train_model(X, y)
+    model, scaler = train(X, y)
 
-    winrate, sharpe, dd = backtest(model, scaler, X, y)
+    log.info(f"📊 TRAIN DONE | samples={len(X)}")
 
-    print("\n📊 BACKTEST RESULTS")
-    print(f"WinRate: {winrate:.2f}")
-    print(f"Sharpe: {sharpe:.2f}")
-    print(f"MaxDrawdown: {dd:.2f}")
+    last_signal = None
 
     while True:
 
-        df = get_ohlcv(50)
+        try:
+            df = get_ohlcv(100)
 
-        latest = df.iloc[-1]
+            latest = live_features(df)
 
-        features = [
-            df["c"].pct_change().iloc[-1],
-            df["c"].pct_change().rolling(10).std().iloc[-1],
-            df["c"].iloc[-1] - df["c"].iloc[-5],
-            50  # placeholder RSI simplified
-        ]
+            pred = model.predict(scaler.transform(latest))[0]
 
-        signal = live_signal(model, scaler, features)
+            signal = "LONG" if pred == 1 else "SHORT"
 
-        price = df["c"].iloc[-1]
+            price = df["c"].iloc[-1]
 
-        print(f"📡 SIGNAL: {signal} | Price: {price:.2f}")
+            if signal != last_signal:
+                log.info(f"📡 SIGNAL: {signal} | PRICE: {price:.2f}")
+                last_signal = signal
+            else:
+                log.info(f"⏳ HOLD | PRICE: {price:.2f}")
+
+        except Exception as e:
+            log.error(f"ERROR: {e}")
 
         await asyncio.sleep(10)
 
