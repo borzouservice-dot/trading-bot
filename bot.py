@@ -3,6 +3,9 @@ import time
 import random
 import asyncio
 import logging
+import json
+import csv
+import pickle
 from dotenv import load_dotenv
 from telegram import Bot
 from telegram.constants import ParseMode
@@ -14,10 +17,15 @@ load_dotenv()
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-SYMBOL = "SOL/USDT"
+SYMBOL = "BTC/USDT"
 
 INTERVAL = 20
 STATUS_INTERVAL = 300
+
+DATA_DIR = "data"
+QTABLE_PATH = f"{DATA_DIR}/qtable.pkl"
+STATS_PATH = f"{DATA_DIR}/stats.json"
+TRADES_PATH = f"{DATA_DIR}/trades.csv"
 
 # ================= LOGGING =================
 logging.basicConfig(
@@ -34,17 +42,54 @@ exchange = ccxt.binance({
     "options": {"defaultType": "spot"}
 })
 
+# ================= LOAD DATA =================
+def load_qtable():
+    if os.path.exists(QTABLE_PATH):
+        with open(QTABLE_PATH, "rb") as f:
+            return pickle.load(f)
+    return {}
+
+def save_qtable():
+    with open(QTABLE_PATH, "wb") as f:
+        pickle.dump(q_table, f)
+
+def load_stats():
+    if os.path.exists(STATS_PATH):
+        with open(STATS_PATH, "r") as f:
+            return json.load(f)
+    return {"wins": 0, "losses": 0, "total": 0}
+
+def save_stats():
+    with open(STATS_PATH, "w") as f:
+        json.dump(stats, f, indent=2)
+
+def log_trade(action, entry, exit_price, profit):
+    file_exists = os.path.exists(TRADES_PATH)
+
+    with open(TRADES_PATH, "a", newline="") as f:
+        writer = csv.writer(f)
+
+        if not file_exists:
+            writer.writerow(["time", "action", "entry", "exit", "profit"])
+
+        writer.writerow([
+            time.strftime("%Y-%m-%d %H:%M:%S"),
+            action,
+            entry,
+            exit_price,
+            profit
+        ])
+
 # ================= STATE =================
-q_table = {}
+q_table = load_qtable()
 active_trade = None
+stats = load_stats()
 
-stats = {"wins": 0, "losses": 0, "total": 0}
-
+ACTIONS = ["LONG", "SHORT", "HOLD"]
 
 # ================= INDICATORS =================
 def sma(data, n):
     return sum(data[-n:]) / n if len(data) >= n else None
-
 
 def rsi(data, n=14):
     if len(data) < n + 1:
@@ -66,99 +111,53 @@ def rsi(data, n=14):
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
-
-def atr(highs, lows, closes, n=14):
-    if len(closes) < n + 1:
-        return None
-
-    trs = []
-    for i in range(1, len(closes)):
-        trs.append(max(
-            highs[i] - lows[i],
-            abs(highs[i] - closes[i - 1]),
-            abs(lows[i] - closes[i - 1])
-        ))
-
-    return sum(trs[-n:]) / n
-
-
-# ================= STATE (MARKET) =================
-def get_state(fast, slow, rsi_val, atr_val):
-
-    return (
-        int(fast > slow),
-        int(rsi_val > 50),
-        int(atr_val > 0)
-    )
-
-
-# ================= Q TABLE =================
-ACTIONS = ["LONG", "SHORT", "HOLD"]
-
+# ================= Q-LEARNING =================
+def get_state(fast, slow, rsi_val):
+    trend = 1 if fast > slow else 0
+    momentum = 1 if rsi_val > 50 else 0
+    return (trend, momentum)
 
 def get_q(state, action):
     return q_table.get((state, action), 0.0)
 
-
 def choose_action(state, epsilon=0.1):
-
     if random.random() < epsilon:
         return random.choice(ACTIONS)
 
-    q_values = [get_q(state, a) for a in ACTIONS]
-
-    return ACTIONS[q_values.index(max(q_values))]
-
+    qs = [get_q(state, a) for a in ACTIONS]
+    return ACTIONS[qs.index(max(qs))]
 
 def update_q(state, action, reward, alpha=0.1):
-
     old = q_table.get((state, action), 0.0)
-
     q_table[(state, action)] = old + alpha * (reward - old)
-
 
 # ================= DATA =================
 def get_data():
-
     ohlcv = exchange.fetch_ohlcv(SYMBOL, timeframe="1m", limit=100)
-
     closes = [c[4] for c in ohlcv]
-    highs = [c[2] for c in ohlcv]
-    lows = [c[3] for c in ohlcv]
-
-    return closes, highs, lows
-
+    return closes
 
 # ================= REWARD =================
-def get_reward(win, profit):
+def reward_fn(win, profit):
+    return profit if win else -profit
 
-    return profit * 2 if win else -profit
-
-
-# ================= AI ENGINE =================
-def ai_engine(price, closes, highs, lows):
-
+# ================= ENGINE =================
+def ai_engine(price, closes):
     fast = sma(closes, 8)
     slow = sma(closes, 21)
     r = rsi(closes, 14)
-    a = atr(highs, lows, closes, 14)
 
-    if None in [fast, slow, r, a]:
-        return None, None, None
+    if None in [fast, slow, r]:
+        return None
 
-    state = get_state(fast, slow, r, a)
-
+    state = get_state(fast, slow, r)
     action = choose_action(state)
 
     if action == "HOLD":
-        return None, state, None
+        return None
 
-    sl = price - a * 1.5 if action == "LONG" else price + a * 1.5
-
-    tp = [
-        price + a if action == "LONG" else price - a,
-        price + a * 2 if action == "LONG" else price - a * 2,
-    ]
+    sl = price * 0.998
+    tp = price * 1.002 if action == "LONG" else price * 0.998
 
     return {
         "state": state,
@@ -167,12 +166,10 @@ def ai_engine(price, closes, highs, lows):
         "sl": sl,
         "tp": tp,
         "time": time.time()
-    }, state, action
+    }
 
-
-# ================= SIMULATION TRADE CHECK =================
+# ================= TRADE =================
 def check_trade(price):
-
     global active_trade, stats
 
     if not active_trade:
@@ -181,33 +178,29 @@ def check_trade(price):
     t = active_trade
 
     if t["action"] == "LONG":
-
-        if price >= t["tp"][0]:
+        if price >= t["tp"]:
             finish_trade(True, price)
-
         elif price <= t["sl"]:
             finish_trade(False, price)
 
     elif t["action"] == "SHORT":
-
-        if price <= t["tp"][0]:
+        if price <= t["tp"]:
             finish_trade(True, price)
-
         elif price >= t["sl"]:
             finish_trade(False, price)
 
-
 def finish_trade(win, price):
-
     global active_trade, stats
 
     entry = active_trade["entry"]
+    action = active_trade["action"]
 
     profit = abs(price - entry)
+    reward = reward_fn(win, profit)
 
-    reward = get_reward(win, profit)
+    update_q(active_trade["state"], action, reward)
 
-    update_q(active_trade["state"], active_trade["action"], reward)
+    log_trade(action, entry, price, profit)
 
     if win:
         stats["wins"] += 1
@@ -216,94 +209,60 @@ def finish_trade(win, price):
 
     stats["total"] += 1
 
-    active_trade["result"] = "WIN" if win else "LOSS"
+    save_qtable()
+    save_stats()
 
     active_trade = None
 
-
-# ================= FORMAT =================
-def format_signal(t):
-
-    emoji = "🟢" if t["action"] == "LONG" else "🔴"
-
-    return f"""
-🚀 BTC/USDT
-
-{emoji} {t['action']} (RL AGENT)
-
-📍 Entry: {t['entry']:.2f}
-
-⛔ SL: {t['sl']:.2f}
-
-🎯 TP1: {t['tp'][0]:.2f}
-🎯 TP2: {t['tp'][1]:.2f}
-
-🧠 State: {t['state']}
-🤖 Mode: Q-Learning RL
-
-""".strip()
-
-
 # ================= REPORT =================
 def report():
-
     if stats["total"] == 0:
         return "📊 No trades yet"
 
     wr = (stats["wins"] / stats["total"]) * 100
 
     return f"""
-📊 RL PERFORMANCE
+📊 LEVEL 8 REPORT
 
 ✅ Wins: {stats['wins']}
 ❌ Losses: {stats['losses']}
 📈 WinRate: {wr:.2f}%
 
 📦 Trades: {stats['total']}
-Q-STATES: {len(q_table)}
+🧠 Q-States: {len(q_table)}
 """.strip()
-
 
 # ================= TELEGRAM =================
 async def send(msg):
-
     try:
         await bot.send_message(CHAT_ID, msg, parse_mode=ParseMode.HTML)
     except Exception as e:
         log.error(e)
 
-
-# ================= MAIN LOOP =================
+# ================= LOOP =================
 async def run():
-
     global active_trade
 
-    await send("🚀 LEVEL 7 RL BOT ONLINE\n🧠 Q-Learning Agent ACTIVE")
+    await send("🚀 LEVEL 8 BOT ONLINE\n🧠 Smart Q-Learning + Persistent Memory")
 
     last_report = time.time()
 
     while True:
 
-        closes, highs, lows = get_data()
-
+        closes = get_data()
         price = closes[-1]
 
         check_trade(price)
 
         if not active_trade:
-
-            trade, state, action = ai_engine(price, closes, highs, lows)
+            trade = ai_engine(price, closes)
 
             if trade:
-
                 active_trade = trade
-
-                await send(f"🚨 NEW RL TRADE\n\n{format_signal(trade)}")
+                await send(f"🚨 NEW TRADE\n\n{trade}")
 
         if time.time() - last_report > STATUS_INTERVAL:
-
             await send(report())
-
             last_report = time.time()
 
         await asyncio.sleep(INTERVAL)
@@ -311,7 +270,6 @@ async def run():
 
 # ================= START =================
 if __name__ == "__main__":
-
     try:
         asyncio.run(run())
     except Exception as e:
