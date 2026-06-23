@@ -1,318 +1,196 @@
-import os
-import time
 import random
-import asyncio
-import logging
-from dotenv import load_dotenv
-from telegram import Bot
-from telegram.constants import ParseMode
-import ccxt
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
 
-# ================= CONFIG =================
-load_dotenv()
-
-TOKEN = os.getenv("TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
-
-SYMBOL = "SOL/USDT"
-
-INTERVAL = 20
-STATUS_INTERVAL = 300
-
-# ================= LOGGING =================
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
-)
-
-log = logging.getLogger(__name__)
-
-bot = Bot(token=TOKEN)
-
-exchange = ccxt.binance({
-    "enableRateLimit": True,
-    "options": {"defaultType": "spot"}
-})
-
-# ================= STATE =================
-q_table = {}
-active_trade = None
-
-stats = {"wins": 0, "losses": 0, "total": 0}
-
-
-# ================= INDICATORS =================
-def sma(data, n):
-    return sum(data[-n:]) / n if len(data) >= n else None
-
-
-def rsi(data, n=14):
-    if len(data) < n + 1:
-        return None
-
-    gains, losses = [], []
-
-    for i in range(1, len(data)):
-        diff = data[i] - data[i - 1]
-        gains.append(max(diff, 0))
-        losses.append(max(-diff, 0))
-
-    avg_gain = sum(gains[-n:]) / n
-    avg_loss = sum(losses[-n:]) / n
-
-    if avg_loss == 0:
-        return 100
-
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
-
-
-def atr(highs, lows, closes, n=14):
-    if len(closes) < n + 1:
-        return None
-
-    trs = []
-    for i in range(1, len(closes)):
-        trs.append(max(
-            highs[i] - lows[i],
-            abs(highs[i] - closes[i - 1]),
-            abs(lows[i] - closes[i - 1])
-        ))
-
-    return sum(trs[-n:]) / n
-
-
-# ================= STATE (MARKET) =================
-def get_state(fast, slow, rsi_val, atr_val):
-
-    return (
-        int(fast > slow),
-        int(rsi_val > 50),
-        int(atr_val > 0)
-    )
-
-
-# ================= Q TABLE =================
+# =========================
+# CONFIG
+# =========================
+STATE_SIZE = 5
 ACTIONS = ["LONG", "SHORT", "HOLD"]
 
+GAMMA = 0.95
+LR = 0.001
+MEMORY_SIZE = 5000
+BATCH_SIZE = 32
 
-def get_q(state, action):
-    return q_table.get((state, action), 0.0)
+# =========================
+# FEATURE ENGINE
+# =========================
+def get_state(closes):
+    closes = np.array(closes)
 
+    if len(closes) < 20:
+        return np.zeros(STATE_SIZE)
 
-def choose_action(state, epsilon=0.1):
-
-    if random.random() < epsilon:
-        return random.choice(ACTIONS)
-
-    q_values = [get_q(state, a) for a in ACTIONS]
-
-    return ACTIONS[q_values.index(max(q_values))]
-
-
-def update_q(state, action, reward, alpha=0.1):
-
-    old = q_table.get((state, action), 0.0)
-
-    q_table[(state, action)] = old + alpha * (reward - old)
-
-
-# ================= DATA =================
-def get_data():
-
-    ohlcv = exchange.fetch_ohlcv(SYMBOL, timeframe="1m", limit=100)
-
-    closes = [c[4] for c in ohlcv]
-    highs = [c[2] for c in ohlcv]
-    lows = [c[3] for c in ohlcv]
-
-    return closes, highs, lows
+    return np.array([
+        (closes[-1] - closes[-2]) / closes[-2],
+        np.mean(closes[-5:]) / closes[-1],
+        np.mean(closes[-20:]) / closes[-1],
+        np.std(closes[-10:]) / closes[-1],
+        closes[-1] - np.min(closes[-20:])
+    ], dtype=np.float32)
 
 
-# ================= REWARD =================
-def get_reward(win, profit):
+# =========================
+# DQN MODEL
+# =========================
+class DQN(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(STATE_SIZE, 64),
+            nn.ReLU(),
+            nn.Linear(64, 64),
+            nn.ReLU(),
+            nn.Linear(64, 3)
+        )
 
-    return profit * 2 if win else -profit
-
-
-# ================= AI ENGINE =================
-def ai_engine(price, closes, highs, lows):
-
-    fast = sma(closes, 8)
-    slow = sma(closes, 21)
-    r = rsi(closes, 14)
-    a = atr(highs, lows, closes, 14)
-
-    if None in [fast, slow, r, a]:
-        return None, None, None
-
-    state = get_state(fast, slow, r, a)
-
-    action = choose_action(state)
-
-    if action == "HOLD":
-        return None, state, None
-
-    sl = price - a * 1.5 if action == "LONG" else price + a * 1.5
-
-    tp = [
-        price + a if action == "LONG" else price - a,
-        price + a * 2 if action == "LONG" else price - a * 2,
-    ]
-
-    return {
-        "state": state,
-        "action": action,
-        "entry": price,
-        "sl": sl,
-        "tp": tp,
-        "time": time.time()
-    }, state, action
+    def forward(self, x):
+        return self.net(x)
 
 
-# ================= SIMULATION TRADE CHECK =================
-def check_trade(price):
+# =========================
+# AGENT
+# =========================
+class Agent:
+    def __init__(self):
 
-    global active_trade, stats
+        self.model = DQN()
+        self.target = DQN()
+        self.target.load_state_dict(self.model.state_dict())
 
-    if not active_trade:
+        self.memory = []
+        self.optimizer = optim.Adam(self.model.parameters(), lr=LR)
+
+    def act(self, state, epsilon=0.1):
+
+        if random.random() < epsilon:
+            return random.randint(0, 2)
+
+        state = torch.tensor(state, dtype=torch.float32)
+        q_values = self.model(state)
+
+        return torch.argmax(q_values).item()
+
+    def store(self, exp):
+
+        if len(self.memory) > MEMORY_SIZE:
+            self.memory.pop(0)
+
+        self.memory.append(exp)
+
+
+# =========================
+# REWARD FUNCTION
+# =========================
+def reward(entry, exit_price, side):
+
+    if side == "LONG":
+        return exit_price - entry
+
+    if side == "SHORT":
+        return entry - exit_price
+
+    return 0
+
+
+# =========================
+# TRAINING
+# =========================
+def train(agent):
+
+    if len(agent.memory) < BATCH_SIZE:
         return
 
-    t = active_trade
+    batch = random.sample(agent.memory, BATCH_SIZE)
 
-    if t["action"] == "LONG":
+    for state, action, r, next_state, done in batch:
 
-        if price >= t["tp"][0]:
-            finish_trade(True, price)
+        state = torch.tensor(state, dtype=torch.float32)
+        next_state = torch.tensor(next_state, dtype=torch.float32)
 
-        elif price <= t["sl"]:
-            finish_trade(False, price)
+        q_val = agent.model(state)[action]
 
-    elif t["action"] == "SHORT":
+        target = r
 
-        if price <= t["tp"][0]:
-            finish_trade(True, price)
+        if not done:
+            target += GAMMA * torch.max(agent.target(next_state))
 
-        elif price >= t["sl"]:
-            finish_trade(False, price)
+        loss = (q_val - target) ** 2
 
-
-def finish_trade(win, price):
-
-    global active_trade, stats
-
-    entry = active_trade["entry"]
-
-    profit = abs(price - entry)
-
-    reward = get_reward(win, profit)
-
-    update_q(active_trade["state"], active_trade["action"], reward)
-
-    if win:
-        stats["wins"] += 1
-    else:
-        stats["losses"] += 1
-
-    stats["total"] += 1
-
-    active_trade["result"] = "WIN" if win else "LOSS"
-
-    active_trade = None
+        agent.optimizer.zero_grad()
+        loss.backward()
+        agent.optimizer.step()
 
 
-# ================= FORMAT =================
-def format_signal(t):
+# =========================
+# SIMULATED MARKET
+# =========================
+def fake_market():
 
-    emoji = "🟢" if t["action"] == "LONG" else "🔴"
-
-    return f"""
-🚀 SOL/USDT
-
-{emoji} {t['action']} (RL AGENT)
-
-📍 Entry: {t['entry']:.2f}
-
-⛔ SL: {t['sl']:.2f}
-
-🎯 TP1: {t['tp'][0]:.2f}
-🎯 TP2: {t['tp'][1]:.2f}
-
-🧠 State: {t['state']}
-🤖 Mode: Q-Learning RL
-
-""".strip()
+    price = 100 + random.randint(-5, 5)
+    return price
 
 
-# ================= REPORT =================
-def report():
+# =========================
+# MAIN LOOP
+# =========================
+def run():
 
-    if stats["total"] == 0:
-        return "📊 No trades yet"
+    agent = Agent()
 
-    wr = (stats["wins"] / stats["total"]) * 100
+    closes = []
+    position = None
 
-    return f"""
-📊 RL PERFORMANCE
+    entry_price = 0
+    entry_action = None
 
-✅ Wins: {stats['wins']}
-❌ Losses: {stats['losses']}
-📈 WinRate: {wr:.2f}%
-
-📦 Trades: {stats['total']}
-Q-STATES: {len(q_table)}
-""".strip()
-
-
-# ================= TELEGRAM =================
-async def send(msg):
-
-    try:
-        await bot.send_message(CHAT_ID, msg, parse_mode=ParseMode.HTML)
-    except Exception as e:
-        log.error(e)
-
-
-# ================= MAIN LOOP =================
-async def run():
-
-    global active_trade
-
-    await send("🚀 LEVEL 7 RL BOT ONLINE\n🧠 Q-Learning Agent ACTIVE")
-
-    last_report = time.time()
+    print("🚀 LEVEL 8 RL TRADING SYSTEM STARTED")
 
     while True:
 
-        closes, highs, lows = get_data()
+        price = fake_market()
+        closes.append(price)
 
-        price = closes[-1]
+        if len(closes) > 100:
+            closes.pop(0)
 
-        check_trade(price)
+        state = get_state(closes)
+        action = agent.act(state)
 
-        if not active_trade:
+        # OPEN POSITION
+        if position is None and action != 2:
 
-            trade, state, action = ai_engine(price, closes, highs, lows)
+            position = True
+            entry_price = price
+            entry_action = action
 
-            if trade:
+            print(f"OPEN {ACTIONS[action]} @ {price}")
 
-                active_trade = trade
+        # CLOSE POSITION
+        elif position:
 
-                await send(f"🚨 NEW RL TRADE\n\n{format_signal(trade)}")
+            r = reward(entry_price, price, ACTIONS[entry_action])
 
-        if time.time() - last_report > STATUS_INTERVAL:
+            next_state = get_state(closes)
 
-            await send(report())
+            agent.store((state, entry_action, r, next_state, True))
 
-            last_report = time.time()
+            train(agent)
 
-        await asyncio.sleep(INTERVAL)
+            print(f"CLOSE | PnL: {r:.2f}")
+
+            position = None
+
+        # slow loop
+        import time
+        time.sleep(1)
 
 
-# ================= START =================
+# =========================
+# START
+# =========================
 if __name__ == "__main__":
-
-    try:
-        asyncio.run(run())
-    except Exception as e:
-        log.critical(e)
+    run()
