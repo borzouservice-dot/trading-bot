@@ -14,6 +14,7 @@ load_dotenv()
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
+# 👉 فقط یک ارز برای تمرکز
 SYMBOLS = ["BTC/USDT"]
 
 INTERVAL = 20
@@ -35,10 +36,6 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
-if not TOKEN or not CHAT_ID:
-    logger.error("TOKEN یا CHAT_ID تنظیم نشده!")
-    exit(1)
-
 bot = Bot(token=TOKEN)
 
 exchange = ccxt.binance({
@@ -46,7 +43,15 @@ exchange = ccxt.binance({
     "options": {"defaultType": "spot"}
 })
 
+# ================= STATE =================
 price_history = {s: [] for s in SYMBOLS}
+active_signals = []
+
+stats = {
+    "wins": 0,
+    "losses": 0,
+    "total": 0
+}
 
 
 # ================= INDICATORS =================
@@ -60,8 +65,7 @@ def rsi(data, period=14):
     if len(data) < period + 1:
         return None
 
-    gains = []
-    losses = []
+    gains, losses = [], []
 
     for i in range(1, len(data)):
         diff = data[i] - data[i - 1]
@@ -78,16 +82,40 @@ def rsi(data, period=14):
     return 100 - (100 / (1 + rs))
 
 
-# ================= DATA =================
+# ================= PRICE =================
 def get_price(symbol):
     try:
         return float(exchange.fetch_ticker(symbol)["last"])
     except Exception as e:
-        logger.error(f"Price error {symbol}: {e}")
+        logger.error(f"Price error: {e}")
         return None
 
 
 # ================= SIGNAL ENGINE =================
+def build_signal(symbol, direction, price, rsi_val):
+
+    is_long = direction == "LONG"
+
+    sl = price * (0.97 if is_long else 1.03)
+
+    tp = [
+        price * (1.02 if is_long else 0.98),
+        price * (1.04 if is_long else 0.96),
+        price * (1.06 if is_long else 0.94),
+        price * (1.08 if is_long else 0.92),
+    ]
+
+    return {
+        "symbol": symbol,
+        "direction": direction,
+        "entry": price,
+        "sl": sl,
+        "tp": tp,
+        "rsi": rsi_val,
+        "confidence": 0.7
+    }
+
+
 def generate_signal(symbol, price):
     history = price_history[symbol]
 
@@ -105,47 +133,16 @@ def generate_signal(symbol, price):
     if short is None or long is None or r is None:
         return None
 
-    # LONG
     if short > long and r < 70:
         return build_signal(symbol, "LONG", price, r)
 
-    # SHORT
     if short < long and r > 30:
         return build_signal(symbol, "SHORT", price, r)
 
     return None
 
 
-# ================= SIGNAL BUILDER =================
-def build_signal(symbol, direction, price, rsi_value):
-
-    is_long = direction == "LONG"
-
-    sl = price * (0.97 if is_long else 1.03)
-
-    tp = [
-        price * (1.02 if is_long else 0.98),
-        price * (1.04 if is_long else 0.96),
-        price * (1.06 if is_long else 0.94),
-        price * (1.08 if is_long else 0.92),
-    ]
-
-    confidence = 0.7
-
-    return {
-        "symbol": symbol,
-        "direction": direction,
-        "entry": "MARKET",
-        "risk": 0.03,
-        "leverage": 20,
-        "sl": sl,
-        "tp": tp,
-        "confidence": confidence,
-        "rsi": rsi_value
-    }
-
-
-# ================= FORMATTER =================
+# ================= FORMAT =================
 def format_signal(s):
     emoji = "🟢" if s["direction"] == "LONG" else "🔴"
 
@@ -158,8 +155,7 @@ def format_signal(s):
 
 {emoji} {s['direction']} SIGNAL
 
-📍 Entry: {s['entry']}
-💰 Risk: {s['risk']*100:.1f}% | Leverage: x{s['leverage']}
+📍 Entry: {s['entry']:.2f}
 📊 RSI: {s['rsi']:.1f}
 🎯 Confidence: {s['confidence']*100:.0f}%
 
@@ -173,43 +169,96 @@ def format_signal(s):
 """.strip()
 
 
+# ================= PERFORMANCE CHECK =================
+def check_signals(price):
+    global stats
+
+    for s in active_signals:
+        if s["status"] != "OPEN":
+            continue
+
+        if s["direction"] == "LONG":
+
+            if price >= s["tp"][0]:
+                s["status"] = "WIN"
+                stats["wins"] += 1
+                stats["total"] += 1
+
+            elif price <= s["sl"]:
+                s["status"] = "LOSS"
+                stats["losses"] += 1
+                stats["total"] += 1
+
+        else:  # SHORT
+
+            if price <= s["tp"][0]:
+                s["status"] = "WIN"
+                stats["wins"] += 1
+                stats["total"] += 1
+
+            elif price >= s["sl"]:
+                s["status"] = "LOSS"
+                stats["losses"] += 1
+                stats["total"] += 1
+
+
+def performance_report():
+    if stats["total"] == 0:
+        return "📊 No trades yet"
+
+    winrate = (stats["wins"] / stats["total"]) * 100
+
+    return f"""
+📊 PERFORMANCE REPORT
+
+✅ Wins: {stats["wins"]}
+❌ Losses: {stats["losses"]}
+📈 Win Rate: {winrate:.2f}%
+
+📦 Total Trades: {stats["total"]}
+"""
+
+
 # ================= TELEGRAM =================
 async def send(text):
     try:
-        await bot.send_message(
-            chat_id=CHAT_ID,
-            text=text,
-            parse_mode=ParseMode.HTML
-        )
+        await bot.send_message(chat_id=CHAT_ID, text=text, parse_mode=ParseMode.HTML)
     except Exception as e:
         logger.error(f"Telegram error: {e}")
 
 
 # ================= MAIN LOOP =================
 async def run():
-    await send("✅ Bot v4 ONLINE - Signal Engine Active")
+    await send("🚀 Bot ONLINE (BTC Only)\n📊 Performance Tracker ACTIVE")
 
     last_status = time.time()
 
     while True:
+
         for symbol in SYMBOLS:
+
             price = get_price(symbol)
             if not price:
                 continue
 
+            # check open trades
+            check_signals(price)
+
             signal = generate_signal(symbol, price)
 
             if signal:
+                active_signals.append({
+                    **signal,
+                    "time": time.time(),
+                    "status": "OPEN"
+                })
+
                 msg = format_signal(signal)
                 await send(f"🚨 NEW SIGNAL\n\n{msg}")
 
-        # status update
+        # status report
         if time.time() - last_status > STATUS_INTERVAL:
-            status = "📊 LIVE STATUS\n\n"
-            for s in SYMBOLS:
-                p = price_history[s][-1] if price_history[s] else 0
-                status += f"{s}: {p:.2f}\n"
-            await send(status)
+            await send(performance_report())
             last_status = time.time()
 
         await asyncio.sleep(INTERVAL)
