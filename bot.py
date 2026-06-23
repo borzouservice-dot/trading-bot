@@ -1,11 +1,7 @@
 import os
 import time
-import random
 import asyncio
 import logging
-import json
-import csv
-import pickle
 from dotenv import load_dotenv
 from telegram import Bot
 from telegram.constants import ParseMode
@@ -18,14 +14,8 @@ TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 SYMBOL = "SOL/USDT"
-
 INTERVAL = 20
 REPORT_INTERVAL = 300
-
-DATA_DIR = "data"
-QTABLE_PATH = f"{DATA_DIR}/qtable.pkl"
-STATS_PATH = f"{DATA_DIR}/stats.json"
-TRADES_PATH = f"{DATA_DIR}/trades.csv"
 
 # ================= LOGGING =================
 logging.basicConfig(level=logging.INFO)
@@ -38,13 +28,17 @@ exchange = ccxt.binance({
     "options": {"defaultType": "spot"}
 })
 
-# ================= STATE =================
-q_table = {}
-stats = {"wins": 0, "losses": 0, "total": 0}
-equity = 1000
+# ================= PAPER ACCOUNT =================
+balance = 1000.0
+equity = 1000.0
+
 active_trade = None
 
-ACTIONS = ["LONG", "SHORT", "HOLD"]
+stats = {
+    "wins": 0,
+    "losses": 0,
+    "total": 0
+}
 
 # ================= INDICATORS =================
 def sma(data, n):
@@ -70,22 +64,13 @@ def rsi(data, n=14):
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
-# ================= ENGINE =================
-def get_state(fast, slow, rsi_val):
-    return (1 if fast > slow else 0, 1 if rsi_val > 50 else 0)
+# ================= DATA =================
+def get_data():
+    ohlcv = exchange.fetch_ohlcv(SYMBOL, "1m", limit=100)
+    return [c[4] for c in ohlcv]
 
-def confidence(fast, slow, rsi_val):
-    score = 0
-    if fast > slow:
-        score += 1
-    if 50 < rsi_val < 70:
-        score += 1
-    return score / 2
-
-def choose_action():
-    return random.choice(ACTIONS)
-
-def ai_engine(price, closes):
+# ================= STRATEGY =================
+def signal(closes):
     fast = sma(closes, 8)
     slow = sma(closes, 21)
     r = rsi(closes, 14)
@@ -93,39 +78,71 @@ def ai_engine(price, closes):
     if None in [fast, slow, r]:
         return None
 
-    conf = confidence(fast, slow, r)
-    if conf < 0.55:
-        return None
+    if fast > slow and r < 70:
+        return "LONG"
 
-    action = choose_action()
-    if action == "HOLD":
-        return None
+    if fast < slow and r > 30:
+        return "SHORT"
 
-    return {
-        "action": action,
+    return None
+
+# ================= POSITION SIZE =================
+def position_size(price):
+    risk = equity * 0.02  # 2%
+    return risk / price
+
+# ================= PAPER TRADE =================
+def open_trade(side, price):
+    global active_trade
+
+    qty = position_size(price)
+
+    active_trade = {
+        "side": side,
         "entry": price,
-        "sl": price * 0.998,
-        "tp": price * 1.003,
-        "conf": conf,
-        "time": time.time()
+        "qty": qty,
+        "sl": price * (0.998 if side == "LONG" else 1.002),
+        "tp": price * (1.003 if side == "LONG" else 1.997)
     }
 
-# ================= TRADE =================
-def finish_trade(win, price):
-    global stats, equity, active_trade
+def close_trade(price, win):
+    global active_trade, equity, stats
 
     entry = active_trade["entry"]
-    pnl = price - entry if active_trade["action"] == "LONG" else entry - price
+    qty = active_trade["qty"]
 
-    if win:
-        stats["wins"] += 1
-        equity += pnl
-    else:
-        stats["losses"] += 1
-        equity -= abs(pnl)
+    pnl = (price - entry) * qty if active_trade["side"] == "LONG" else (entry - price) * qty
+
+    equity += pnl
 
     stats["total"] += 1
+    if win:
+        stats["wins"] += 1
+    else:
+        stats["losses"] += 1
+
     active_trade = None
+
+# ================= CHECK TRADE =================
+def check_trade(price):
+    global active_trade
+
+    if not active_trade:
+        return
+
+    t = active_trade
+
+    if t["side"] == "LONG":
+        if price >= t["tp"]:
+            close_trade(price, True)
+        elif price <= t["sl"]:
+            close_trade(price, False)
+
+    elif t["side"] == "SHORT":
+        if price <= t["tp"]:
+            close_trade(price, True)
+        elif price >= t["sl"]:
+            close_trade(price, False)
 
 # ================= REPORT =================
 def report():
@@ -135,15 +152,14 @@ def report():
     winrate = (stats["wins"] / stats["total"]) * 100
 
     return f"""
-📊 RL PERFORMANCE (LEVEL 8.5)
+📊 PAPER TRADING REPORT
+
+💰 Equity: {equity:.2f} USDT
+📈 Winrate: {winrate:.2f}%
 
 ✅ Wins: {stats['wins']}
 ❌ Losses: {stats['losses']}
-📈 WinRate: {winrate:.2f}%
-
 📦 Trades: {stats['total']}
-💰 Equity: {equity:.2f}
-Q-States: {len(q_table)}
 """.strip()
 
 # ================= TELEGRAM =================
@@ -155,46 +171,43 @@ async def send(msg):
 
 # ================= LOOP =================
 async def run():
-    global active_trade
 
     await send(f"""
-🚀 BOT STARTED
+🚀 PAPER TRADING STARTED
 
-🧠 LEVEL 8.5 ACTIVE
+🧠 LEVEL 8.6 ACTIVE
 🚀 SYMBOL: {SYMBOL}
 
-📊 PROFIT ENGINE ONLINE
+💰 VIRTUAL BALANCE: {equity}
 """.strip())
 
     last_report = time.time()
 
     while True:
 
-        ohlcv = exchange.fetch_ohlcv(SYMBOL, "1m", limit=100)
-        closes = [c[4] for c in ohlcv]
+        closes = get_data()
         price = closes[-1]
 
-        if not active_trade:
-            trade = ai_engine(price, closes)
+        check_trade(price)
 
-            if trade:
-                active_trade = trade
+        if not active_trade:
+            sig = signal(closes)
+
+            if sig:
+                open_trade(sig, price)
 
                 await send(f"""
-🚨 NEW TRADE
+🚨 PAPER TRADE
 
 🚀 {SYMBOL}
-🟢 {trade['action']}
+🟢 {sig}
 
-📍 Entry: {trade['entry']:.2f}
-⛔ SL: {trade['sl']:.2f}
-🎯 TP: {trade['tp']:.2f}
+📍 Entry: {price:.2f}
+💰 Equity: {equity:.2f}
 
-📊 Confidence: {trade['conf']:.2f}
-🧠 LEVEL 8.5
+🧠 LEVEL 8.6
 """.strip())
 
-        # REPORT SYSTEM
         if time.time() - last_report > REPORT_INTERVAL:
             await send(report())
             last_report = time.time()
