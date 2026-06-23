@@ -1,7 +1,8 @@
-import os
 import time
+import random
 import asyncio
 import logging
+from collections import defaultdict
 from dotenv import load_dotenv
 from telegram import Bot
 from telegram.constants import ParseMode
@@ -17,10 +18,6 @@ SYMBOL = "SOL/USDT"
 INTERVAL = 20
 REPORT_INTERVAL = 300
 
-# ================= LOGGING =================
-logging.basicConfig(level=logging.INFO)
-log = logging.getLogger(__name__)
-
 bot = Bot(token=TOKEN)
 
 exchange = ccxt.binance({
@@ -28,139 +25,73 @@ exchange = ccxt.binance({
     "options": {"defaultType": "spot"}
 })
 
-# ================= PAPER ACCOUNT =================
-balance = 1000.0
-equity = 1000.0
-
-active_trade = None
-
-stats = {
-    "wins": 0,
-    "losses": 0,
-    "total": 0
+# ================= STRATEGIES =================
+STRATEGIES = {
+    "S1": {"fast": 5, "slow": 20},
+    "S2": {"fast": 8, "slow": 21},
+    "S3": {"fast": 10, "slow": 30},
 }
+
+results = defaultdict(lambda: {"wins": 0, "losses": 0, "equity": 1000})
+
+active_trades = {}
 
 # ================= INDICATORS =================
 def sma(data, n):
     return sum(data[-n:]) / n if len(data) >= n else None
 
-def rsi(data, n=14):
-    if len(data) < n + 1:
-        return None
-
-    gains, losses = [], []
-
-    for i in range(1, len(data)):
-        diff = data[i] - data[i - 1]
-        gains.append(max(diff, 0))
-        losses.append(max(-diff, 0))
-
-    avg_gain = sum(gains[-n:]) / n
-    avg_loss = sum(losses[-n:]) / n
-
-    if avg_loss == 0:
-        return 100
-
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
-
-# ================= DATA =================
 def get_data():
     ohlcv = exchange.fetch_ohlcv(SYMBOL, "1m", limit=100)
     return [c[4] for c in ohlcv]
 
-# ================= STRATEGY =================
-def signal(closes):
-    fast = sma(closes, 8)
-    slow = sma(closes, 21)
-    r = rsi(closes, 14)
+# ================= SIGNAL =================
+def signal(closes, fast, slow):
+    f = sma(closes, fast)
+    s = sma(closes, slow)
 
-    if None in [fast, slow, r]:
+    if None in [f, s]:
         return None
 
-    if fast > slow and r < 70:
+    if f > s:
         return "LONG"
-
-    if fast < slow and r > 30:
+    if f < s:
         return "SHORT"
-
     return None
 
-# ================= POSITION SIZE =================
-def position_size(price):
-    risk = equity * 0.02  # 2%
-    return risk / price
+# ================= EXECUTION SIM =================
+def open_trade(strategy, side, price):
+    results[strategy]["entry"] = price
+    results[strategy]["side"] = side
 
-# ================= PAPER TRADE =================
-def open_trade(side, price):
-    global active_trade
+def close_trade(strategy, price):
+    entry = results[strategy]["entry"]
+    side = results[strategy]["side"]
 
-    qty = position_size(price)
+    pnl = price - entry if side == "LONG" else entry - price
 
-    active_trade = {
-        "side": side,
-        "entry": price,
-        "qty": qty,
-        "sl": price * (0.998 if side == "LONG" else 1.002),
-        "tp": price * (1.003 if side == "LONG" else 1.997)
-    }
-
-def close_trade(price, win):
-    global active_trade, equity, stats
-
-    entry = active_trade["entry"]
-    qty = active_trade["qty"]
-
-    pnl = (price - entry) * qty if active_trade["side"] == "LONG" else (entry - price) * qty
-
-    equity += pnl
-
-    stats["total"] += 1
-    if win:
-        stats["wins"] += 1
+    if pnl > 0:
+        results[strategy]["wins"] += 1
+        results[strategy]["equity"] += pnl
     else:
-        stats["losses"] += 1
+        results[strategy]["losses"] += 1
+        results[strategy]["equity"] -= abs(pnl)
 
-    active_trade = None
+# ================= SCORING =================
+def score(strategy):
+    w = results[strategy]["wins"]
+    l = results[strategy]["losses"]
+    t = w + l
 
-# ================= CHECK TRADE =================
-def check_trade(price):
-    global active_trade
+    if t == 0:
+        return 0
 
-    if not active_trade:
-        return
+    winrate = w / t
+    equity = results[strategy]["equity"]
 
-    t = active_trade
+    return winrate * 0.7 + (equity / 1000) * 0.3
 
-    if t["side"] == "LONG":
-        if price >= t["tp"]:
-            close_trade(price, True)
-        elif price <= t["sl"]:
-            close_trade(price, False)
-
-    elif t["side"] == "SHORT":
-        if price <= t["tp"]:
-            close_trade(price, True)
-        elif price >= t["sl"]:
-            close_trade(price, False)
-
-# ================= REPORT =================
-def report():
-    if stats["total"] == 0:
-        return "📊 No trades yet"
-
-    winrate = (stats["wins"] / stats["total"]) * 100
-
-    return f"""
-📊 PAPER TRADING REPORT
-
-💰 Equity: {equity:.2f} USDT
-📈 Winrate: {winrate:.2f}%
-
-✅ Wins: {stats['wins']}
-❌ Losses: {stats['losses']}
-📦 Trades: {stats['total']}
-""".strip()
+def best_strategy():
+    return max(STRATEGIES.keys(), key=lambda s: score(s))
 
 # ================= TELEGRAM =================
 async def send(msg):
@@ -172,14 +103,12 @@ async def send(msg):
 # ================= LOOP =================
 async def run():
 
-    await send(f"""
-🚀 PAPER TRADING STARTED
+    await send("""
+🚀 LEVEL 8.7 STARTED
 
-🧠 LEVEL 8.6 ACTIVE
-🚀 SYMBOL: {SYMBOL}
-
-💰 VIRTUAL BALANCE: {equity}
-""".strip())
+🧠 STRATEGY OPTIMIZER ACTIVE
+📊 MULTI-STRATEGY MODE ON
+""")
 
     last_report = time.time()
 
@@ -188,28 +117,36 @@ async def run():
         closes = get_data()
         price = closes[-1]
 
-        check_trade(price)
+        best = best_strategy()
+        params = STRATEGIES[best]
 
-        if not active_trade:
-            sig = signal(closes)
+        sig = signal(closes, params["fast"], params["slow"])
 
-            if sig:
-                open_trade(sig, price)
+        if sig:
+            open_trade(best, sig, price)
 
-                await send(f"""
-🚨 PAPER TRADE
-
-🚀 {SYMBOL}
-🟢 {sig}
-
-📍 Entry: {price:.2f}
-💰 Equity: {equity:.2f}
-
-🧠 LEVEL 8.6
-""".strip())
+        # simulate close (simple)
+        for s in STRATEGIES:
+            if "entry" in results[s]:
+                close_trade(s, price)
 
         if time.time() - last_report > REPORT_INTERVAL:
-            await send(report())
+
+            msg = "📊 STRATEGY REPORT\n\n"
+
+            for s in STRATEGIES:
+                msg += f"""
+{s}
+Win: {results[s]['wins']}
+Loss: {results[s]['losses']}
+Equity: {results[s]['equity']:.2f}
+Score: {score(s):.2f}
+"""
+
+            msg += f"\n🏆 BEST: {best_strategy()}"
+
+            await send(msg)
+
             last_report = time.time()
 
         await asyncio.sleep(INTERVAL)
