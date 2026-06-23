@@ -23,16 +23,36 @@ exchange = ccxt.binance({
 })
 
 # ================= STATE =================
-positions = []
-history = []
-
-equity = 1000  # starting capital
+equity = 1000
 
 stats = {
     "wins": 0,
     "losses": 0,
     "total": 0
 }
+
+positions = []
+
+# ================= RISK ENGINE =================
+def get_winrate():
+    if stats["total"] == 0:
+        return 0.5
+    return stats["wins"] / stats["total"]
+
+def risk_per_trade():
+    wr = get_winrate()
+
+    # 🧠 adaptive risk logic
+    if wr > 0.6:
+        return 0.02   # 2% aggressive
+    elif wr > 0.45:
+        return 0.01   # 1% normal
+    else:
+        return 0.005  # 0.5% safe
+
+def position_size():
+    risk = risk_per_trade()
+    return equity * risk
 
 # ================= PRICE =================
 def get_price():
@@ -42,19 +62,21 @@ def get_price():
 # ================= POSITION =================
 def open_position(side, price):
 
+    size = position_size()
+
     return {
         "side": side,
         "entry": price,
         "tp": price * (1.003),
         "sl": price * (0.998),
-        "size": equity * 0.1,  # 10% risk
+        "size": size,
         "open_time": time.time()
     }
 
 # ================= CLOSE =================
 def close_position(pos, price):
 
-    global equity, stats, history
+    global equity, stats
 
     pnl = (price - pos["entry"]) if pos["side"] == "LONG" else (pos["entry"] - price)
 
@@ -67,54 +89,57 @@ def close_position(pos, price):
     else:
         stats["losses"] += 1
 
-    history.append({
-        "side": pos["side"],
-        "entry": pos["entry"],
-        "exit": price,
-        "pnl": pnl
-    })
+# ================= DRAWDOWN CONTROL =================
+def risk_guard():
 
-# ================= CHECK POSITIONS =================
+    wr = get_winrate()
+
+    if equity < 800:   # hard stop
+        return False
+
+    if wr < 0.3 and stats["total"] > 10:
+        return False
+
+    return True
+
+# ================= CHECK =================
 def check_positions(price):
 
     global positions
 
-    new_positions = []
+    new = []
 
     for p in positions:
 
         if p["side"] == "LONG":
-
             if price >= p["tp"] or price <= p["sl"]:
                 close_position(p, price)
                 continue
-
         else:
-
             if price <= p["tp"] or price >= p["sl"]:
                 close_position(p, price)
                 continue
 
-        new_positions.append(p)
+        new.append(p)
 
-    positions = new_positions
+    positions = new
 
-# ================= STATS =================
+# ================= REPORT =================
 def report():
 
-    wr = (stats["wins"] / stats["total"] * 100) if stats["total"] > 0 else 0
+    wr = get_winrate() * 100
 
     return f"""
-📊 PORTFOLIO REPORT (9.2)
+📊 LEVEL 9.3 RISK ENGINE
 
 💰 Equity: {equity:.2f}
-📦 Open Positions: {len(positions)}
-📈 Total Trades: {stats["total"]}
-🟢 Wins: {stats["wins"]}
-🔴 Losses: {stats["losses"]}
-📊 WinRate: {wr:.2f}%
+📦 Positions: {len(positions)}
 
-🧠 SYSTEM: MULTI-POSITION ACTIVE
+📈 WinRate: {wr:.2f}%
+📊 Trades: {stats["total"]}
+
+🧠 Risk per trade: {risk_per_trade()*100:.2f}%
+⚖️ Mode: ADAPTIVE RISK
 """.strip()
 
 # ================= TELEGRAM =================
@@ -129,33 +154,40 @@ async def run():
 
     global positions
 
-    await send("🚀 LEVEL 9.2 STARTED\n📊 PORTFOLIO ENGINE ACTIVE")
+    await send("🚀 LEVEL 9.3 STARTED\n🧠 ADAPTIVE RISK ENGINE ACTIVE")
 
     last_report = time.time()
 
     while True:
 
+        if not risk_guard():
+            await send("🛑 RISK LIMIT ACTIVE - TRADING PAUSED")
+            await asyncio.sleep(30)
+            continue
+
         price = get_price()
 
         check_positions(price)
 
-        # 🟢 open new positions (demo logic)
-        if len(positions) < 3:
+        # 🟢 open positions
+        if len(positions) < 2:
+
             side = "LONG" if price % 2 > 1 else "SHORT"
 
             positions.append(open_position(side, price))
 
             await send(f"""
-🚨 NEW POSITION (9.2)
+🚨 NEW POSITION (9.3)
 
 🚀 {SYMBOL}
 {side}
 
 📍 Entry: {price:.2f}
-📦 Size: 10% equity
+📦 Size: {position_size():.2f} USDT
+⚖️ Risk: {risk_per_trade()*100:.2f}%
 """.strip())
 
-        # 📊 periodic report
+        # 📊 report
         if time.time() - last_report > 60:
 
             await send(report())
