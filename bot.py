@@ -1,8 +1,8 @@
 import os
 import time
+import random
 import asyncio
 import logging
-from datetime import datetime
 from dotenv import load_dotenv
 from telegram import Bot
 from telegram.constants import ParseMode
@@ -22,11 +22,7 @@ STATUS_INTERVAL = 300
 # ================= LOGGING =================
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("bot.log", encoding="utf-8")
-    ]
+    format="%(asctime)s | %(levelname)s | %(message)s"
 )
 
 log = logging.getLogger(__name__)
@@ -39,7 +35,9 @@ exchange = ccxt.binance({
 })
 
 # ================= STATE =================
-active_trades = []
+q_table = {}
+active_trade = None
+
 stats = {"wins": 0, "losses": 0, "total": 0}
 
 
@@ -84,8 +82,44 @@ def atr(highs, lows, closes, n=14):
     return sum(trs[-n:]) / n
 
 
+# ================= STATE (MARKET) =================
+def get_state(fast, slow, rsi_val, atr_val):
+
+    return (
+        int(fast > slow),
+        int(rsi_val > 50),
+        int(atr_val > 0)
+    )
+
+
+# ================= Q TABLE =================
+ACTIONS = ["LONG", "SHORT", "HOLD"]
+
+
+def get_q(state, action):
+    return q_table.get((state, action), 0.0)
+
+
+def choose_action(state, epsilon=0.1):
+
+    if random.random() < epsilon:
+        return random.choice(ACTIONS)
+
+    q_values = [get_q(state, a) for a in ACTIONS]
+
+    return ACTIONS[q_values.index(max(q_values))]
+
+
+def update_q(state, action, reward, alpha=0.1):
+
+    old = q_table.get((state, action), 0.0)
+
+    q_table[(state, action)] = old + alpha * (reward - old)
+
+
 # ================= DATA =================
-def get_ohlcv():
+def get_data():
+
     ohlcv = exchange.fetch_ohlcv(SYMBOL, timeframe="1m", limit=100)
 
     closes = [c[4] for c in ohlcv]
@@ -95,48 +129,14 @@ def get_ohlcv():
     return closes, highs, lows
 
 
-def confirm_5m():
-    ohlcv = exchange.fetch_ohlcv(SYMBOL, timeframe="5m", limit=50)
-    closes = [c[4] for c in ohlcv]
+# ================= REWARD =================
+def get_reward(win, profit):
 
-    fast = sma(closes, 8)
-    slow = sma(closes, 21)
-
-    if fast is None or slow is None:
-        return False
-
-    return fast > slow
+    return profit * 2 if win else -profit
 
 
-# ================= INTELLIGENCE =================
-def market_regime(fast, slow, atr_val):
-    diff = abs(fast - slow)
-
-    if diff < atr_val * 0.2:
-        return "RANGE"
-
-    return "UPTREND" if fast > slow else "DOWNTREND"
-
-
-def signal_score(rsi_val, fast, slow, atr_val):
-    score = 0
-
-    if abs(fast - slow) > atr_val * 0.5:
-        score += 40
-
-    if 30 < rsi_val < 70:
-        score += 30
-
-    score += 15  # momentum
-
-    if atr_val > 0:
-        score += 15
-
-    return score
-
-
-# ================= SIGNAL ENGINE =================
-def signal_engine(price, closes, highs, lows):
+# ================= AI ENGINE =================
+def ai_engine(price, closes, highs, lows):
 
     fast = sma(closes, 8)
     slow = sma(closes, 21)
@@ -144,121 +144,107 @@ def signal_engine(price, closes, highs, lows):
     a = atr(highs, lows, closes, 14)
 
     if None in [fast, slow, r, a]:
-        return None
+        return None, None, None
 
-    regime = market_regime(fast, slow, a)
+    state = get_state(fast, slow, r, a)
 
-    if regime == "RANGE":
-        return None
+    action = choose_action(state)
 
-    score = signal_score(r, fast, slow, a)
+    if action == "HOLD":
+        return None, state, None
 
-    if score < 60:
-        return None
+    sl = price - a * 1.5 if action == "LONG" else price + a * 1.5
 
-    if not confirm_5m():
-        return None
+    tp = [
+        price + a if action == "LONG" else price - a,
+        price + a * 2 if action == "LONG" else price - a * 2,
+    ]
 
-    # LONG
-    if fast > slow and r < 70:
+    return {
+        "state": state,
+        "action": action,
+        "entry": price,
+        "sl": sl,
+        "tp": tp,
+        "time": time.time()
+    }, state, action
 
-        sl = price - a * 1.5
-        tp = [price + a, price + a * 2, price + a * 3]
 
-        return {
-            "symbol": SYMBOL,
-            "direction": "LONG",
-            "entry": price,
-            "sl": sl,
-            "tp": tp,
-            "confidence": score / 100
-        }
+# ================= SIMULATION TRADE CHECK =================
+def check_trade(price):
 
-    # SHORT
-    if fast < slow and r > 30:
+    global active_trade, stats
 
-        sl = price + a * 1.5
-        tp = [price - a, price - a * 2, price - a * 3]
+    if not active_trade:
+        return
 
-        return {
-            "symbol": SYMBOL,
-            "direction": "SHORT",
-            "entry": price,
-            "sl": sl,
-            "tp": tp,
-            "confidence": score / 100
-        }
+    t = active_trade
 
-    return None
+    if t["action"] == "LONG":
+
+        if price >= t["tp"][0]:
+            finish_trade(True, price)
+
+        elif price <= t["sl"]:
+            finish_trade(False, price)
+
+    elif t["action"] == "SHORT":
+
+        if price <= t["tp"][0]:
+            finish_trade(True, price)
+
+        elif price >= t["sl"]:
+            finish_trade(False, price)
+
+
+def finish_trade(win, price):
+
+    global active_trade, stats
+
+    entry = active_trade["entry"]
+
+    profit = abs(price - entry)
+
+    reward = get_reward(win, profit)
+
+    update_q(active_trade["state"], active_trade["action"], reward)
+
+    if win:
+        stats["wins"] += 1
+    else:
+        stats["losses"] += 1
+
+    stats["total"] += 1
+
+    active_trade["result"] = "WIN" if win else "LOSS"
+
+    active_trade = None
 
 
 # ================= FORMAT =================
-def format_signal(s):
+def format_signal(t):
 
-    emoji = "🟢" if s["direction"] == "LONG" else "🔴"
-
-    risk = abs(s["entry"] - s["sl"])
-
-    tp_text = ""
-    for i, t in enumerate(s["tp"], 1):
-        rr = abs(t - s["entry"]) / risk
-        tp_text += f"• TP{i}: {t:.2f} ({rr:.1f}R)\n"
+    emoji = "🟢" if t["action"] == "LONG" else "🔴"
 
     return f"""
 🚀 BTC/USDT
 
-{emoji} {s['direction']} SIGNAL
+{emoji} {t['action']} (RL AGENT)
 
-📍 Entry: {s['entry']:.2f}
-📊 Confidence: {s['confidence']*100:.0f}%
+📍 Entry: {t['entry']:.2f}
 
-━━━━━━━━━━━━━━━
-⛔ Stop Loss: {s['sl']:.2f}
+⛔ SL: {t['sl']:.2f}
 
-🎯 Take Profits:
-{tp_text}
-━━━━━━━━━━━━━━━
-🧠 Engine: Intelligence v2 (ATR + Regime + Score)
-⚡ Mode: PRO LEVEL 2
-🕒 {datetime.utcnow().strftime('%H:%M UTC')}
+🎯 TP1: {t['tp'][0]:.2f}
+🎯 TP2: {t['tp'][1]:.2f}
+
+🧠 State: {t['state']}
+🤖 Mode: Q-Learning RL
+
 """.strip()
 
 
-# ================= TRACKING =================
-def check_trades(price):
-
-    global stats
-
-    for t in active_trades:
-
-        if t["status"] != "OPEN":
-            continue
-
-        if t["direction"] == "LONG":
-
-            if price >= t["tp"][0]:
-                t["status"] = "WIN"
-                stats["wins"] += 1
-                stats["total"] += 1
-
-            elif price <= t["sl"]:
-                t["status"] = "LOSS"
-                stats["losses"] += 1
-                stats["total"] += 1
-
-        else:
-
-            if price <= t["tp"][0]:
-                t["status"] = "WIN"
-                stats["wins"] += 1
-                stats["total"] += 1
-
-            elif price >= t["sl"]:
-                t["status"] = "LOSS"
-                stats["losses"] += 1
-                stats["total"] += 1
-
-
+# ================= REPORT =================
 def report():
 
     if stats["total"] == 0:
@@ -267,20 +253,22 @@ def report():
     wr = (stats["wins"] / stats["total"]) * 100
 
     return f"""
-📊 PERFORMANCE REPORT
+📊 RL PERFORMANCE
 
 ✅ Wins: {stats['wins']}
 ❌ Losses: {stats['losses']}
 📈 WinRate: {wr:.2f}%
 
 📦 Trades: {stats['total']}
+Q-STATES: {len(q_table)}
 """.strip()
 
 
 # ================= TELEGRAM =================
 async def send(msg):
+
     try:
-        await bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode=ParseMode.HTML)
+        await bot.send_message(CHAT_ID, msg, parse_mode=ParseMode.HTML)
     except Exception as e:
         log.error(e)
 
@@ -288,31 +276,34 @@ async def send(msg):
 # ================= MAIN LOOP =================
 async def run():
 
-    await send("🚀 LEVEL 2 BOT ONLINE\n🧠 Intelligence Engine ACTIVE")
+    global active_trade
+
+    await send("🚀 LEVEL 7 RL BOT ONLINE\n🧠 Q-Learning Agent ACTIVE")
 
     last_report = time.time()
 
     while True:
 
-        closes, highs, lows = get_ohlcv()
+        closes, highs, lows = get_data()
+
         price = closes[-1]
 
-        check_trades(price)
+        check_trade(price)
 
-        signal = signal_engine(price, closes, highs, lows)
+        if not active_trade:
 
-        if signal:
+            trade, state, action = ai_engine(price, closes, highs, lows)
 
-            active_trades.append({
-                **signal,
-                "status": "OPEN",
-                "time": time.time()
-            })
+            if trade:
 
-            await send(f"🚨 SIGNAL\n\n{format_signal(signal)}")
+                active_trade = trade
+
+                await send(f"🚨 NEW RL TRADE\n\n{format_signal(trade)}")
 
         if time.time() - last_report > STATUS_INTERVAL:
+
             await send(report())
+
             last_report = time.time()
 
         await asyncio.sleep(INTERVAL)
@@ -320,6 +311,7 @@ async def run():
 
 # ================= START =================
 if __name__ == "__main__":
+
     try:
         asyncio.run(run())
     except Exception as e:
