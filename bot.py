@@ -7,7 +7,6 @@ from telegram import Bot
 from telegram.constants import ParseMode
 from dotenv import load_dotenv
 import os
-import time
 
 # ================= CONFIG =================
 load_dotenv()
@@ -31,99 +30,99 @@ logging.basicConfig(
     format="%(asctime)s | %(message)s"
 )
 
-log = logging.getLogger("LEVEL18_SMC")
+log = logging.getLogger("LEVEL19")
 
 # ================= DATA =================
-def get_data(limit=150):
-    ohlcv = exchange.fetch_ohlcv(SYMBOL, "1m", limit=limit)
-    df = pd.DataFrame(ohlcv, columns=["t","o","h","l","c","v"])
-    return df
+def get_data(tf="1m", limit=200):
+    ohlcv = exchange.fetch_ohlcv(SYMBOL, tf, limit=limit)
+    return pd.DataFrame(ohlcv, columns=["t","o","h","l","c","v"])
 
 # ================= STRUCTURE =================
-def detect_structure(df):
+def structure(df):
 
-    highs = df["h"]
-    lows = df["l"]
-
-    resistance = highs.rolling(20).max().iloc[-2]
-    support = lows.rolling(20).min().iloc[-2]
+    high = df["h"].rolling(20).max().iloc[-2]
+    low = df["l"].rolling(20).min().iloc[-2]
 
     price = df["c"].iloc[-1]
 
-    return support, resistance, price
+    return low, high, price
 
-# ================= LIQUIDITY SWEEP =================
-def liquidity_sweep(df, support, resistance):
+# ================= VOLUME SPIKE =================
+def volume_spike(df):
+
+    vol_mean = df["v"].rolling(20).mean().iloc[-2]
+    last_vol = df["v"].iloc[-1]
+
+    return last_vol > vol_mean * 1.8
+
+# ================= BREAKOUT CONFIRMATION =================
+def breakout(df, resistance, support):
 
     last = df.iloc[-1]
 
-    # wick above resistance but close below → fake breakout
-    if last["h"] > resistance and last["c"] < resistance:
-        return "SELL_SIDE_SWEEP"
+    body = abs(last["c"] - last["o"])
+    range_size = last["h"] - last["l"]
 
-    # wick below support but close above → fake breakdown
-    if last["l"] < support and last["c"] > support:
-        return "BUY_SIDE_SWEEP"
+    strength = body / (range_size + 1e-9)
 
-    return "NONE"
+    bull_break = last["c"] > resistance and strength > 0.6
+    bear_break = last["c"] < support and strength > 0.6
 
-# ================= BREAK OF STRUCTURE =================
-def bos(df):
-
-    recent_high = df["h"].iloc[-10:].max()
-    recent_low = df["l"].iloc[-10:].min()
-    price = df["c"].iloc[-1]
-
-    if price > recent_high:
-        return "BULL_BOS"
-    if price < recent_low:
-        return "BEAR_BOS"
+    if bull_break:
+        return "BULL_BREAK"
+    if bear_break:
+        return "BEAR_BREAK"
 
     return "NONE"
 
-# ================= SIGNAL ENGINE =================
-def analyze(df):
+# ================= MULTI TIMEFRAME =================
+def analyze():
 
-    support, resistance, price = detect_structure(df)
+    df_1m = get_data("1m")
+    df_5m = get_data("5m")
+    df_15m = get_data("15m")
 
-    sweep = liquidity_sweep(df, support, resistance)
-    structure = bos(df)
+    sup1, res1, price = structure(df_1m)
+    sup5, res5, _ = structure(df_5m)
+    sup15, res15, _ = structure(df_15m)
+
+    vol_ok = volume_spike(df_1m)
+
+    brk1 = breakout(df_1m, res1, sup1)
+    brk5 = breakout(df_5m, res5, sup5)
 
     score = 50
 
-    # BOS confirmation
-    if structure == "BULL_BOS":
-        score += 30
-    if structure == "BEAR_BOS":
-        score -= 30
+    # multi timeframe alignment
+    if brk1 == brk5 == "BULL_BREAK":
+        score += 35
 
-    # liquidity sweep logic
-    if sweep == "BUY_SIDE_SWEEP":
-        score += 20
-    if sweep == "SELL_SIDE_SWEEP":
-        score -= 20
+    if brk1 == brk5 == "BEAR_BREAK":
+        score -= 35
 
-    # zone logic
-    in_discount = price < support * 1.01
-    in_premium = price > resistance * 0.99
-
-    if in_discount:
+    # liquidity alignment
+    if price > res1 and price > res5:
         score += 10
-    if in_premium:
+
+    if price < sup1 and price < sup5:
         score -= 10
 
-    # final decision
+    # volume confirmation
+    if vol_ok:
+        score += 15
+    else:
+        score -= 10
+
+    signal = "WAIT"
     if score >= 75:
         signal = "LONG"
     elif score <= 25:
         signal = "SHORT"
-    else:
-        signal = "WAIT"
 
-    return signal, score, price, support, resistance, sweep, structure
+    return signal, score, price, sup1, res1, vol_ok, brk1, brk5
 
 # ================= FORMAT =================
-def format_signal(signal, score, price, support, resistance, sweep, structure):
+def format_signal(signal, score, price, sup, res, vol, brk1, brk5):
 
     if signal == "WAIT":
         return f"""
@@ -131,44 +130,42 @@ def format_signal(signal, score, price, support, resistance, sweep, structure):
 
 ⚪ NO TRADE ZONE
 
-📉 Market Structure Unclear
 🧠 Score: {score}/100
 
-⚡ Waiting for liquidity confirmation
+📉 Multi-TF not aligned
+💧 Volume: {"OK" if vol else "LOW"}
+
+⚡ Waiting for clean breakout
 """.strip()
 
     direction = "🟢 LONG" if signal == "LONG" else "🔴 SHORT"
 
-    entry_low = support if signal == "LONG" else resistance
-    entry_high = price
-
-    sl = support * 0.995 if signal == "LONG" else resistance * 1.005
-    tp1 = price + (price - support) * 1.2 if signal == "LONG" else price - (resistance - price) * 1.2
-    tp2 = price + (price - support) * 2 if signal == "LONG" else price - (resistance - price) * 2
+    sl = sup * 0.995 if signal == "LONG" else res * 1.005
+    tp1 = price + abs(price - sup) * 1.2 if signal == "LONG" else price - abs(res - price) * 1.2
+    tp2 = price + abs(price - sup) * 2 if signal == "LONG" else price - abs(res - price) * 2
 
     return f"""
-🚀 SOL/USDT (LEVEL 18 SMC LITE)
+🚀 SOL/USDT (LEVEL 19 PRO SMC)
 
 {direction}
 
-📍 Entry Zone:
-{entry_low:.2f} - {entry_high:.2f}
+📍 Entry: {price:.2f}
+📊 Support: {sup:.2f}
+📊 Resistance: {res:.2f}
 
-📊 Support: {support:.2f}
-📊 Resistance: {resistance:.2f}
+📈 Breakout 1m: {brk1}
+📈 Breakout 5m: {brk5}
 
-🧠 Structure: {structure}
-💧 Liquidity: {sweep}
+💧 Volume Spike: {"YES" if vol else "NO"}
 
 🧠 Confidence: {score}/100
 
 ⛔ SL: {sl:.2f}
 
-🎯 Targets:
-TP1: {tp1:.2f}
-TP2: {tp2:.2f}
+🎯 TP1: {tp1:.2f}
+🎯 TP2: {tp2:.2f}
 
-📡 Mode: SMART MONEY LITE (SOL OPTIMIZED)
+📡 Mode: MULTI-TIMEFRAME SMC PRO
 """.strip()
 
 # ================= TELEGRAM =================
@@ -181,7 +178,7 @@ async def send(msg):
 # ================= LOOP =================
 async def run():
 
-    await send("🚀 LEVEL 18 STARTED\n🧠 SMART MONEY LITE ACTIVE (SOL)")
+    await send("🚀 LEVEL 19 STARTED\n🧠 MULTI-TF SMC PRO ACTIVE")
 
     last_signal = None
 
@@ -189,15 +186,13 @@ async def run():
 
         try:
 
-            df = get_data()
-
-            signal, score, price, sup, res, sweep, structure = analyze(df)
+            signal, score, price, sup, res, vol, brk1, brk5 = analyze()
 
             log.info(f"{signal} | {score} | {price:.2f}")
 
             if signal != "WAIT" and signal != last_signal:
 
-                msg = format_signal(signal, score, price, sup, res, sweep, structure)
+                msg = format_signal(signal, score, price, sup, res, vol, brk1, brk5)
                 await send(msg)
 
                 last_signal = signal
