@@ -1,114 +1,160 @@
 import ccxt
-import numpy as np
-import pandas as pd
 import asyncio
-import time
 import logging
-
-from sklearn.linear_model import LogisticRegression
-from sklearn.preprocessing import StandardScaler
+import random
+import time
 
 # ================= LOGGING =================
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s | %(message)s"
+    format="%(asctime)s | %(levelname)s | %(message)s"
 )
 
-log = logging.getLogger()
+log = logging.getLogger("BOT")
 
-# ================= EXCHANGE =================
+# ================= CONFIG =================
+SYMBOL = "SOL/USDT"
+INTERVAL = 10
+
 exchange = ccxt.binance({
     "enableRateLimit": True,
     "options": {"defaultType": "spot"}
 })
 
-SYMBOL = "SOL/USDT"
+# ================= STATE =================
+equity = 1000
+positions = []
+
+stats = {
+    "wins": 0,
+    "losses": 0,
+    "total": 0
+}
 
 # ================= DATA =================
-def get_ohlcv(limit=200):
-    data = exchange.fetch_ohlcv(SYMBOL, "1m", limit=limit)
-    df = pd.DataFrame(data, columns=["t","o","h","l","c","v"])
-    return df
+def get_price():
+    ohlcv = exchange.fetch_ohlcv(SYMBOL, "1m", limit=1)
+    return ohlcv[-1][4]
 
-# ================= FEATURES =================
-def build_features(df):
+# ================= SIMPLE STRATEGY =================
+def signal_engine(price):
 
-    df = df.copy()
+    # ساده ولی پایدار (بدون ML)
+    rand = random.random()
 
-    df["ret"] = df["c"].pct_change()
-    df["vol"] = df["ret"].rolling(10).std()
-    df["mom"] = df["c"] - df["c"].shift(5)
+    if rand > 0.55:
+        return "LONG"
+    elif rand < 0.45:
+        return "SHORT"
+    else:
+        return "HOLD"
 
-    df = df.dropna()
+# ================= POSITION =================
+def open_position(side, price):
 
-    X = df[["ret","vol","mom"]].values
-    y = (df["c"].shift(-1) > df["c"]).astype(int).values[:-1]
+    return {
+        "side": side,
+        "entry": price,
+        "tp": price * 1.003,
+        "sl": price * 0.998,
+        "time": time.time()
+    }
 
-    return X[:-1], y[:-1]
+# ================= CLOSE =================
+def close_position(pos, price):
 
-# ================= TRAIN =================
-def train(X, y):
+    global equity, stats
 
-    scaler = StandardScaler()
-    Xs = scaler.fit_transform(X)
+    pnl = (price - pos["entry"]) if pos["side"] == "LONG" else (pos["entry"] - price)
 
-    model = LogisticRegression()
-    model.fit(Xs, y)
+    equity += pnl
 
-    return model, scaler
+    stats["total"] += 1
 
-# ================= LIVE FEATURES SAFE =================
-def live_features(df):
+    if pnl > 0:
+        stats["wins"] += 1
+    else:
+        stats["losses"] += 1
 
-    ret = df["c"].pct_change().iloc[-1]
-    vol = df["c"].pct_change().rolling(10).std().iloc[-1]
-    mom = df["c"].iloc[-1] - df["c"].iloc[-5]
+# ================= CHECK =================
+def check_positions(price):
 
-    # 🧠 FIX NaN
-    if np.isnan(ret): ret = 0
-    if np.isnan(vol): vol = 0
-    if np.isnan(mom): mom = 0
+    global positions
 
-    return np.array([ret, vol, mom]).reshape(1, -1)
+    new = []
 
-# ================= MAIN =================
+    for p in positions:
+
+        if p["side"] == "LONG":
+            if price >= p["tp"] or price <= p["sl"]:
+                close_position(p, price)
+                continue
+
+        else:
+            if price <= p["tp"] or price >= p["sl"]:
+                close_position(p, price)
+                continue
+
+        new.append(p)
+
+    positions = new
+
+# ================= REPORT =================
+def report():
+
+    wr = (stats["wins"] / stats["total"] * 100) if stats["total"] else 0
+
+    return f"""
+📊 LEVEL 12 LITE (STABLE CORE)
+
+💰 Equity: {equity:.2f}
+📦 Open: {len(positions)}
+
+📈 Trades: {stats["total"]}
+🟢 Wins: {stats["wins"]}
+🔴 Losses: {stats["losses"]}
+📊 WinRate: {wr:.2f}%
+
+🧠 Status: STABLE RUNNING
+""".strip()
+
+# ================= LOOP =================
 async def run():
 
-    log.info("🚀 LEVEL 12 FIXED STARTED")
+    log.info("🚀 LEVEL 12 LITE STARTED (STABLE MODE)")
 
-    df = get_ohlcv()
-
-    X, y = build_features(df)
-
-    model, scaler = train(X, y)
-
-    log.info(f"📊 TRAIN DONE | samples={len(X)}")
-
-    last_signal = None
+    last_report = time.time()
 
     while True:
 
         try:
-            df = get_ohlcv(100)
+            price = get_price()
 
-            latest = live_features(df)
+            check_positions(price)
 
-            pred = model.predict(scaler.transform(latest))[0]
+            signal = signal_engine(price)
 
-            signal = "LONG" if pred == 1 else "SHORT"
+            # open trade logic
+            if signal != "HOLD" and len(positions) < 2:
 
-            price = df["c"].iloc[-1]
+                pos = open_position(signal, price)
+                positions.append(pos)
 
-            if signal != last_signal:
-                log.info(f"📡 SIGNAL: {signal} | PRICE: {price:.2f}")
-                last_signal = signal
+                log.info(f"🚨 NEW {signal} | Entry: {price:.2f}")
+
+            # report
+            if time.time() - last_report > 60:
+
+                log.info(report())
+                last_report = time.time()
+
             else:
-                log.info(f"⏳ HOLD | PRICE: {price:.2f}")
+                log.info(f"⏳ LIVE | Price: {price:.2f} | Pos: {len(positions)}")
 
         except Exception as e:
             log.error(f"ERROR: {e}")
 
-        await asyncio.sleep(10)
+        await asyncio.sleep(INTERVAL)
 
 # ================= START =================
 if __name__ == "__main__":
