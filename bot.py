@@ -27,58 +27,49 @@ active_trade = None
 last_signal = None
 
 # ================= DATA =================
-def get_data(timeframe="1m"):
-    ohlcv = exchange.fetch_ohlcv(SYMBOL, timeframe, limit=100)
+def get_data():
+    ohlcv = exchange.fetch_ohlcv(SYMBOL, "1m", limit=100)
     return [c[4] for c in ohlcv]
 
-# ================= INDICATOR =================
+# ================= INDICATORS =================
 def sma(data, n):
     return sum(data[-n:]) / n if len(data) >= n else None
 
-# ================= SINGLE TF SIGNAL =================
-def single_signal(closes):
-    fast = sma(closes, 8)
-    slow = sma(closes, 21)
-
-    if fast is None or slow is None:
+def rsi(data, n=14):
+    if len(data) < n + 1:
         return None
 
-    if fast > slow:
+    gains, losses = [], []
+
+    for i in range(1, len(data)):
+        diff = data[i] - data[i - 1]
+        gains.append(max(diff, 0))
+        losses.append(max(-diff, 0))
+
+    avg_gain = sum(gains[-n:]) / n
+    avg_loss = sum(losses[-n:]) / n
+
+    if avg_loss == 0:
+        return 100
+
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+# ================= SIGNAL =================
+def signal(closes):
+    fast = sma(closes, 8)
+    slow = sma(closes, 21)
+    r = rsi(closes, 14)
+
+    if None in [fast, slow, r]:
+        return None
+
+    if fast > slow and r < 70:
         return "LONG"
-    elif fast < slow:
+    if fast < slow and r > 30:
         return "SHORT"
+
     return None
-
-# ================= MULTI TIMEFRAME ENGINE =================
-def get_mtf_signal():
-
-    s1 = single_signal(get_data("1m"))
-    s2 = single_signal(get_data("5m"))
-    s3 = single_signal(get_data("15m"))
-
-    signals = [s1, s2, s3]
-
-    long_count = signals.count("LONG")
-    short_count = signals.count("SHORT")
-
-    # 🔥 Confidence logic
-    if long_count == 3:
-        return "LONG", 95
-    if short_count == 3:
-        return "SHORT", 95
-
-    if long_count == 2:
-        return "LONG", 75
-    if short_count == 2:
-        return "SHORT", 75
-
-    if long_count == 1 and short_count == 0:
-        return "LONG", 55
-
-    if short_count == 1 and long_count == 0:
-        return "SHORT", 55
-
-    return None, 0
 
 # ================= TRADE ENGINE =================
 def open_trade(side, price):
@@ -87,15 +78,15 @@ def open_trade(side, price):
     active_trade = {
         "side": side,
         "entry": price,
-        "tp": price * (1.003 if side == "LONG" else 0.997),
-        "sl": price * (0.998 if side == "LONG" else 1.002)
+        "sl": price * (0.998 if side == "LONG" else 1.002),
+        "tp1": price * (1.0025 if side == "LONG" else 0.9975),
+        "tp2": price * (1.006 if side == "LONG" else 0.994),
+        "trail": None,
+        "tp1_hit": False
     }
 
-def close_trade(price):
-    global active_trade
-    active_trade = None
-
-def check_trade(price):
+# ================= TRAILING STOP =================
+def update_trailing(price):
     global active_trade
 
     if not active_trade:
@@ -104,31 +95,71 @@ def check_trade(price):
     t = active_trade
 
     if t["side"] == "LONG":
-        if price >= t["tp"] or price <= t["sl"]:
-            close_trade(price)
-    else:
-        if price <= t["tp"] or price >= t["sl"]:
-            close_trade(price)
 
-# ================= UI FORMAT =================
-def format_signal(symbol, side, price, confidence):
+        if price > t["entry"] * 1.002:
+            t["trail"] = price * 0.999
+
+        if t["trail"] and price <= t["trail"]:
+            close_trade()
+
+    else:
+
+        if price < t["entry"] * 0.998:
+            t["trail"] = price * 1.001
+
+        if t["trail"] and price >= t["trail"]:
+            close_trade()
+
+# ================= EXIT LOGIC =================
+def check_trade(price):
+    global active_trade
+
+    if not active_trade:
+        return
+
+    t = active_trade
+
+    # 🟢 TP1 partial
+    if not t["tp1_hit"]:
+        if (t["side"] == "LONG" and price >= t["tp1"]) or \
+           (t["side"] == "SHORT" and price <= t["tp1"]):
+            t["tp1_hit"] = True
+
+    # 🟢 TP2 full exit
+    if (t["side"] == "LONG" and price >= t["tp2"]) or \
+       (t["side"] == "SHORT" and price <= t["tp2"]):
+        close_trade()
+
+    # ⛔ SL exit
+    if (t["side"] == "LONG" and price <= t["sl"]) or \
+       (t["side"] == "SHORT" and price >= t["sl"]):
+        close_trade()
+
+    update_trailing(price)
+
+# ================= CLOSE TRADE =================
+def close_trade():
+    global active_trade
+    active_trade = None
+
+# ================= UI =================
+def format_signal(symbol, side, price):
 
     emoji = "🟢" if side == "LONG" else "🔴"
 
-    bar = "█" * int(confidence / 10)
-
     return f"""
-🚀 {symbol} SIGNAL (8.9.4 MTF)
+🚀 {symbol} SIGNAL (LEVEL 9)
 
 {emoji} {side} ENTRY
 
 📍 Entry: {price:.2f}
-📊 Confidence: {confidence}%
-📈 Strength: {bar}
 
-🧠 Timeframes: 1m / 5m / 15m
+🎯 TP1 (partial)
+🎯 TP2 (full)
+⛔ SL active
 
-📦 Status: VALIDATED SIGNAL
+📈 Trailing Stop: ON
+🧠 Execution Engine ACTIVE
 """.strip()
 
 # ================= TELEGRAM =================
@@ -143,33 +174,25 @@ async def run():
 
     global last_signal
 
-    await send("🚀 LEVEL 8.9.4 STARTED\n🧠 MULTI-TIMEFRAME AI ACTIVE")
+    await send("🚀 LEVEL 9 STARTED\n🧠 EXECUTION INTELLIGENCE ACTIVE")
 
     while True:
 
-        closes = get_data("1m")
+        closes = get_data()
         price = closes[-1]
 
         check_trade(price)
 
-        side, confidence = get_mtf_signal()
+        if not active_trade:
 
-        # ❌ filter weak signals
-        if confidence < 70:
-            await asyncio.sleep(INTERVAL)
-            continue
+            sig = signal(closes)
 
-        # 🚫 avoid duplicates
-        if side == last_signal:
-            await asyncio.sleep(INTERVAL)
-            continue
+            if sig and sig != last_signal:
 
-        if side and not active_trade:
+                open_trade(sig, price)
+                last_signal = sig
 
-            open_trade(side, price)
-            last_signal = side
-
-            await send(format_signal(SYMBOL, side, price, confidence))
+                await send(format_signal(SYMBOL, sig, price))
 
         await asyncio.sleep(INTERVAL)
 
