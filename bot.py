@@ -1,8 +1,9 @@
 import ccxt
 import asyncio
 import time
-import random
 import logging
+import numpy as np
+import pandas as pd
 from telegram import Bot
 from telegram.constants import ParseMode
 from dotenv import load_dotenv
@@ -30,35 +31,54 @@ logging.basicConfig(
     format="%(asctime)s | %(message)s"
 )
 
-log = logging.getLogger("LEVEL12.1")
+log = logging.getLogger("LEVEL13")
 
 # ================= STATE =================
 positions = []
 equity = 1000
 
-stats = {
-    "wins": 0,
-    "losses": 0,
-    "total": 0
-}
+stats = {"wins": 0, "losses": 0, "total": 0}
 
 MAX_POSITIONS = 2
 
-# ================= PRICE =================
-def get_price():
-    ohlcv = exchange.fetch_ohlcv(SYMBOL, "1m", limit=1)
-    return ohlcv[-1][4]
+# ================= DATA =================
+def get_data(limit=100):
+    ohlcv = exchange.fetch_ohlcv(SYMBOL, "1m", limit=limit)
+    df = pd.DataFrame(ohlcv, columns=["t","o","h","l","c","v"])
+    return df
+
+# ================= INDICATORS =================
+def ema(series, period):
+    return series.ewm(span=period, adjust=False).mean()
+
+def rsi(series, period=14):
+    delta = series.diff()
+    gain = delta.clip(lower=0).rolling(period).mean()
+    loss = -delta.clip(upper=0).rolling(period).mean()
+    rs = gain / (loss + 1e-9)
+    return 100 - (100 / (1 + rs))
 
 # ================= SIGNAL ENGINE =================
-def signal_engine(price):
+def signal_engine(df):
 
-    r = random.random()
+    df["ema_fast"] = ema(df["c"], 9)
+    df["ema_slow"] = ema(df["c"], 21)
+    df["rsi"] = rsi(df["c"], 14)
 
-    if r > 0.55:
-        return "LONG"
-    elif r < 0.45:
-        return "SHORT"
-    return "HOLD"
+    latest = df.iloc[-1]
+
+    trend_up = latest["ema_fast"] > latest["ema_slow"]
+    trend_down = latest["ema_fast"] < latest["ema_slow"]
+
+    rsi_val = latest["rsi"]
+
+    if trend_up and rsi_val < 70:
+        return "LONG", latest["c"]
+
+    if trend_down and rsi_val > 30:
+        return "SHORT", latest["c"]
+
+    return "HOLD", latest["c"]
 
 # ================= POSITION =================
 def open_position(side, price):
@@ -66,8 +86,8 @@ def open_position(side, price):
     return {
         "side": side,
         "entry": price,
-        "tp": price * 1.003,
-        "sl": price * 0.998,
+        "tp": price * 1.004,
+        "sl": price * 0.997,
         "time": time.time()
     }
 
@@ -116,7 +136,7 @@ def report():
     wr = (stats["wins"] / stats["total"] * 100) if stats["total"] else 0
 
     return f"""
-📊 LEVEL 12.1 STATUS
+📊 LEVEL 13 DASHBOARD
 
 💰 Equity: {equity:.2f}
 📦 Positions: {len(positions)}
@@ -126,7 +146,8 @@ def report():
 🔴 Losses: {stats["losses"]}
 📊 WinRate: {wr:.2f}%
 
-⚡ Mode: VISUAL ENGINE ACTIVE
+📡 Strategy: EMA(9/21) + RSI Filter
+⚡ Mode: PRO SIGNAL ENGINE
 """.strip()
 
 # ================= TELEGRAM =================
@@ -136,26 +157,26 @@ async def send(msg):
     except Exception as e:
         log.error(e)
 
-# ================= START MESSAGE =================
-async def start_message():
+# ================= START =================
+async def start_msg():
 
     msg = f"""
 🚀 BOT STARTED
 
-🧠 LEVEL 12.1 ACTIVE
+🧠 LEVEL 13 ACTIVE
 📡 SYMBOL: {SYMBOL}
-⚡ MODE: VISUAL SIGNAL ENGINE
 
-📊 SYSTEM ONLINE
-    """.strip()
+📊 EMA + RSI STRATEGY LOADED
+⚡ PRO MODE ENABLED
+""".strip()
 
     await send(msg)
-    log.info("BOT STARTED")
+    log.info("STARTED")
 
 # ================= LOOP =================
 async def run():
 
-    await start_message()
+    await start_msg()
 
     last_report = time.time()
 
@@ -163,20 +184,20 @@ async def run():
 
         try:
 
-            price = get_price()
+            df = get_data()
+
+            signal, price = signal_engine(df)
 
             check_positions(price)
 
-            signal = signal_engine(price)
-
-            # 🚨 anti-overtrade
+            # 🚨 filter quality trades
             if signal != "HOLD" and len(positions) < MAX_POSITIONS:
 
                 pos = open_position(signal, price)
                 positions.append(pos)
 
                 msg = f"""
-🚨 NEW SIGNAL (12.1)
+🚨 NEW TRADE (LEVEL 13)
 
 🚀 {SYMBOL}
 📊 {signal}
@@ -185,7 +206,8 @@ async def run():
 🎯 TP: {pos['tp']:.2f}
 ⛔ SL: {pos['sl']:.2f}
 
-📦 Positions: {len(positions)}/{MAX_POSITIONS}
+📡 EMA + RSI CONFIRMED
+📦 Positions: {len(positions)}
 """.strip()
 
                 await send(msg)
@@ -193,7 +215,7 @@ async def run():
                 log.info(f"{signal} | {price:.2f}")
 
             else:
-                log.info(f"LIVE | {price:.2f} | Pos: {len(positions)}")
+                log.info(f"WAIT | {price:.2f} | Pos: {len(positions)}")
 
             if time.time() - last_report > 60:
 
