@@ -3,11 +3,11 @@ import asyncio
 import pandas as pd
 import numpy as np
 import logging
-import time
 from telegram import Bot
 from telegram.constants import ParseMode
 from dotenv import load_dotenv
 import os
+import time
 
 # ================= CONFIG =================
 load_dotenv()
@@ -31,77 +31,88 @@ logging.basicConfig(
     format="%(asctime)s | %(message)s"
 )
 
-log = logging.getLogger("LEVEL17_SOL")
+log = logging.getLogger("LEVEL18_SMC")
 
 # ================= DATA =================
-def get_data(limit=120):
+def get_data(limit=150):
     ohlcv = exchange.fetch_ohlcv(SYMBOL, "1m", limit=limit)
     df = pd.DataFrame(ohlcv, columns=["t","o","h","l","c","v"])
     return df
 
-# ================= INDICATORS =================
-def ema(s, n):
-    return s.ewm(span=n).mean()
+# ================= STRUCTURE =================
+def detect_structure(df):
 
-def atr(df, n=14):
-    hl = df["h"] - df["l"]
-    hc = abs(df["h"] - df["c"].shift())
-    lc = abs(df["l"] - df["c"].shift())
-    tr = pd.concat([hl, hc, lc], axis=1).max(axis=1)
-    return tr.rolling(n).mean()
+    highs = df["h"]
+    lows = df["l"]
 
-# ================= SOL BEHAVIOR FILTER =================
-def detect_fake_breakout(df):
+    resistance = highs.rolling(20).max().iloc[-2]
+    support = lows.rolling(20).min().iloc[-2]
+
+    price = df["c"].iloc[-1]
+
+    return support, resistance, price
+
+# ================= LIQUIDITY SWEEP =================
+def liquidity_sweep(df, support, resistance):
 
     last = df.iloc[-1]
-    prev = df.iloc[-2]
 
-    body = abs(last["c"] - last["o"])
-    wick_up = last["h"] - max(last["c"], last["o"])
-    wick_down = min(last["c"], last["o"]) - last["l"]
+    # wick above resistance but close below → fake breakout
+    if last["h"] > resistance and last["c"] < resistance:
+        return "SELL_SIDE_SWEEP"
 
-    # wick dominance = fake breakout signal
-    if wick_up > body * 2 or wick_down > body * 2:
-        return True
+    # wick below support but close above → fake breakdown
+    if last["l"] < support and last["c"] > support:
+        return "BUY_SIDE_SWEEP"
 
-    return False
+    return "NONE"
+
+# ================= BREAK OF STRUCTURE =================
+def bos(df):
+
+    recent_high = df["h"].iloc[-10:].max()
+    recent_low = df["l"].iloc[-10:].min()
+    price = df["c"].iloc[-1]
+
+    if price > recent_high:
+        return "BULL_BOS"
+    if price < recent_low:
+        return "BEAR_BOS"
+
+    return "NONE"
 
 # ================= SIGNAL ENGINE =================
 def analyze(df):
 
-    df["ema9"] = ema(df["c"], 9)
-    df["ema21"] = ema(df["c"], 21)
-    df["atr"] = atr(df)
+    support, resistance, price = detect_structure(df)
 
-    last = df.iloc[-1]
-
-    price = last["c"]
-
-    trend_up = last["ema9"] > last["ema21"]
-    trend_down = last["ema9"] < last["ema21"]
-
-    volatility = last["atr"]
+    sweep = liquidity_sweep(df, support, resistance)
+    structure = bos(df)
 
     score = 50
 
-    # trend
-    if trend_up:
-        score += 25
-    if trend_down:
-        score -= 25
+    # BOS confirmation
+    if structure == "BULL_BOS":
+        score += 30
+    if structure == "BEAR_BOS":
+        score -= 30
 
-    # volatility control (SOL important)
-    if volatility > df["atr"].mean() * 1.5:
+    # liquidity sweep logic
+    if sweep == "BUY_SIDE_SWEEP":
+        score += 20
+    if sweep == "SELL_SIDE_SWEEP":
         score -= 20
-    else:
-        score += 5
 
-    # fake breakout penalty
-    fake = detect_fake_breakout(df)
-    if fake:
-        score -= 25
+    # zone logic
+    in_discount = price < support * 1.01
+    in_premium = price > resistance * 0.99
 
-    # signal decision
+    if in_discount:
+        score += 10
+    if in_premium:
+        score -= 10
+
+    # final decision
     if score >= 75:
         signal = "LONG"
     elif score <= 25:
@@ -109,10 +120,10 @@ def analyze(df):
     else:
         signal = "WAIT"
 
-    return signal, score, price, volatility, fake
+    return signal, score, price, support, resistance, sweep, structure
 
 # ================= FORMAT =================
-def format_signal(signal, score, price, atr_val, fake):
+def format_signal(signal, score, price, support, resistance, sweep, structure):
 
     if signal == "WAIT":
         return f"""
@@ -120,43 +131,44 @@ def format_signal(signal, score, price, atr_val, fake):
 
 ⚪ NO TRADE ZONE
 
+📉 Market Structure Unclear
 🧠 Score: {score}/100
-📉 Market is unstable
-⚡ Waiting for clean setup
+
+⚡ Waiting for liquidity confirmation
 """.strip()
 
     direction = "🟢 LONG" if signal == "LONG" else "🔴 SHORT"
 
-    # SOL dynamic zone (not fixed price)
-    entry_low = price * 0.998
-    entry_high = price * 1.002
+    entry_low = support if signal == "LONG" else resistance
+    entry_high = price
 
-    sl = price - atr_val * 1.8 if signal == "LONG" else price + atr_val * 1.8
-    tp1 = price + atr_val * 2.2 if signal == "LONG" else price - atr_val * 2.2
-    tp2 = price + atr_val * 3.5 if signal == "LONG" else price - atr_val * 3.5
+    sl = support * 0.995 if signal == "LONG" else resistance * 1.005
+    tp1 = price + (price - support) * 1.2 if signal == "LONG" else price - (resistance - price) * 1.2
+    tp2 = price + (price - support) * 2 if signal == "LONG" else price - (resistance - price) * 2
 
     return f"""
-🚀 SOL/USDT (LEVEL 17)
+🚀 SOL/USDT (LEVEL 18 SMC LITE)
 
 {direction}
 
 📍 Entry Zone:
 {entry_low:.2f} - {entry_high:.2f}
 
-⚖️ Leverage: x1
-🛡 Risk: 0.5% – 1%
+📊 Support: {support:.2f}
+📊 Resistance: {resistance:.2f}
 
-⛔ Stop-Loss: {sl:.2f}
+🧠 Structure: {structure}
+💧 Liquidity: {sweep}
+
+🧠 Confidence: {score}/100
+
+⛔ SL: {sl:.2f}
 
 🎯 Targets:
 TP1: {tp1:.2f}
 TP2: {tp2:.2f}
 
-🧠 Confidence: {score}/100
-📊 Volatility: {"HIGH" if atr_val > 0 else "NORMAL"}
-⚠️ Fake Breakout: {"YES" if fake else "NO"}
-
-📡 Mode: SOL OPTIMIZED ENGINE
+📡 Mode: SMART MONEY LITE (SOL OPTIMIZED)
 """.strip()
 
 # ================= TELEGRAM =================
@@ -169,7 +181,7 @@ async def send(msg):
 # ================= LOOP =================
 async def run():
 
-    await send("🚀 LEVEL 17 SOL ENGINE STARTED\n🧠 Fake Breakout Filter ACTIVE")
+    await send("🚀 LEVEL 18 STARTED\n🧠 SMART MONEY LITE ACTIVE (SOL)")
 
     last_signal = None
 
@@ -179,14 +191,13 @@ async def run():
 
             df = get_data()
 
-            signal, score, price, atr_val, fake = analyze(df)
+            signal, score, price, sup, res, sweep, structure = analyze(df)
 
             log.info(f"{signal} | {score} | {price:.2f}")
 
-            # cooldown system (important for SOL)
             if signal != "WAIT" and signal != last_signal:
 
-                msg = format_signal(signal, score, price, atr_val, fake)
+                msg = format_signal(signal, score, price, sup, res, sweep, structure)
                 await send(msg)
 
                 last_signal = signal
