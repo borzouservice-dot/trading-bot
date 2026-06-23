@@ -1,29 +1,40 @@
 import ccxt
 import asyncio
-import logging
-import random
 import time
-
-# ================= LOGGING =================
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
-)
-
-log = logging.getLogger("BOT")
+import random
+import logging
+from telegram import Bot
+from telegram.constants import ParseMode
+from dotenv import load_dotenv
+import os
 
 # ================= CONFIG =================
+load_dotenv()
+
+TOKEN = os.getenv("TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+
 SYMBOL = "SOL/USDT"
 INTERVAL = 10
+
+bot = Bot(token=TOKEN)
 
 exchange = ccxt.binance({
     "enableRateLimit": True,
     "options": {"defaultType": "spot"}
 })
 
+# ================= LOGGING =================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(message)s"
+)
+
+log = logging.getLogger("LEVEL12.1")
+
 # ================= STATE =================
-equity = 1000
 positions = []
+equity = 1000
 
 stats = {
     "wins": 0,
@@ -31,23 +42,23 @@ stats = {
     "total": 0
 }
 
-# ================= DATA =================
+MAX_POSITIONS = 2
+
+# ================= PRICE =================
 def get_price():
     ohlcv = exchange.fetch_ohlcv(SYMBOL, "1m", limit=1)
     return ohlcv[-1][4]
 
-# ================= SIMPLE STRATEGY =================
+# ================= SIGNAL ENGINE =================
 def signal_engine(price):
 
-    # ساده ولی پایدار (بدون ML)
-    rand = random.random()
+    r = random.random()
 
-    if rand > 0.55:
+    if r > 0.55:
         return "LONG"
-    elif rand < 0.45:
+    elif r < 0.45:
         return "SHORT"
-    else:
-        return "HOLD"
+    return "HOLD"
 
 # ================= POSITION =================
 def open_position(side, price):
@@ -105,51 +116,89 @@ def report():
     wr = (stats["wins"] / stats["total"] * 100) if stats["total"] else 0
 
     return f"""
-📊 LEVEL 12 LITE (STABLE CORE)
+📊 LEVEL 12.1 STATUS
 
 💰 Equity: {equity:.2f}
-📦 Open: {len(positions)}
+📦 Positions: {len(positions)}
 
 📈 Trades: {stats["total"]}
 🟢 Wins: {stats["wins"]}
 🔴 Losses: {stats["losses"]}
 📊 WinRate: {wr:.2f}%
 
-🧠 Status: STABLE RUNNING
+⚡ Mode: VISUAL ENGINE ACTIVE
 """.strip()
+
+# ================= TELEGRAM =================
+async def send(msg):
+    try:
+        await bot.send_message(CHAT_ID, msg, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        log.error(e)
+
+# ================= START MESSAGE =================
+async def start_message():
+
+    msg = f"""
+🚀 BOT STARTED
+
+🧠 LEVEL 12.1 ACTIVE
+📡 SYMBOL: {SYMBOL}
+⚡ MODE: VISUAL SIGNAL ENGINE
+
+📊 SYSTEM ONLINE
+    """.strip()
+
+    await send(msg)
+    log.info("BOT STARTED")
 
 # ================= LOOP =================
 async def run():
 
-    log.info("🚀 LEVEL 12 LITE STARTED (STABLE MODE)")
+    await start_message()
 
     last_report = time.time()
 
     while True:
 
         try:
+
             price = get_price()
 
             check_positions(price)
 
             signal = signal_engine(price)
 
-            # open trade logic
-            if signal != "HOLD" and len(positions) < 2:
+            # 🚨 anti-overtrade
+            if signal != "HOLD" and len(positions) < MAX_POSITIONS:
 
                 pos = open_position(signal, price)
                 positions.append(pos)
 
-                log.info(f"🚨 NEW {signal} | Entry: {price:.2f}")
+                msg = f"""
+🚨 NEW SIGNAL (12.1)
 
-            # report
-            if time.time() - last_report > 60:
+🚀 {SYMBOL}
+📊 {signal}
 
-                log.info(report())
-                last_report = time.time()
+📍 Entry: {price:.2f}
+🎯 TP: {pos['tp']:.2f}
+⛔ SL: {pos['sl']:.2f}
+
+📦 Positions: {len(positions)}/{MAX_POSITIONS}
+""".strip()
+
+                await send(msg)
+
+                log.info(f"{signal} | {price:.2f}")
 
             else:
-                log.info(f"⏳ LIVE | Price: {price:.2f} | Pos: {len(positions)}")
+                log.info(f"LIVE | {price:.2f} | Pos: {len(positions)}")
+
+            if time.time() - last_report > 60:
+
+                await send(report())
+                last_report = time.time()
 
         except Exception as e:
             log.error(f"ERROR: {e}")
