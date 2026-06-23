@@ -8,141 +8,216 @@ from telegram import Bot
 from telegram.constants import ParseMode
 import ccxt
 
-# ====================== CONFIG ======================
+# ================= CONFIG =================
 load_dotenv()
 
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-SYMBOLS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT']
-INTERVAL = 30
+SYMBOLS = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
+
+INTERVAL = 20
 STATUS_INTERVAL = 300
 
-MA_SHORT = 8      # کوتاه‌تر برای سیگنال سریع‌تر
-MA_LONG = 15
+MA_SHORT = 8
+MA_LONG = 21
 RSI_PERIOD = 14
 
-# ====================== LOGGING ======================
+# ================= LOGGING =================
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler(), logging.FileHandler("trading_bot.log", encoding="utf-8")]
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("trading_bot.log", encoding="utf-8")
+    ]
 )
+
 logger = logging.getLogger(__name__)
 
 if not TOKEN or not CHAT_ID:
-    logger.error("❌ TOKEN یا CHAT_ID تنظیم نشده!")
+    logger.error("TOKEN یا CHAT_ID تنظیم نشده!")
     exit(1)
 
 bot = Bot(token=TOKEN)
 
 exchange = ccxt.binance({
-    'enableRateLimit': True,
-    'options': {'defaultType': 'spot'}
+    "enableRateLimit": True,
+    "options": {"defaultType": "spot"}
 })
 
-price_histories = {symbol: [] for symbol in SYMBOLS}
+price_history = {s: [] for s in SYMBOLS}
 
-def preload_history(symbol):
-    """پیش‌بارگذاری داده‌های تاریخی برای جلوگیری از صبر اولیه"""
-    try:
-        logger.info(f"در حال بارگذاری تاریخچه برای {symbol}...")
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe='5m', limit=100)  # ۱۰۰ کندل ۵ دقیقه‌ای ≈ ۸ ساعت داده
-        closes = [candle[4] for candle in ohlcv]  # Close price
-        price_histories[symbol] = closes[-80:]    # فقط ۸۰ تای آخر رو نگه دار
-        logger.info(f"✅ {symbol}: {len(price_histories[symbol])} داده تاریخی بارگذاری شد")
-        return True
-    except Exception as e:
-        logger.error(f"خطا در پیش‌بارگذاری {symbol}: {e}")
-        return False
 
-def get_current_price(symbol):
-    try:
-        ticker = exchange.fetch_ticker(symbol)
-        return float(ticker['last'])
-    except Exception as e:
-        logger.error(f"خطا قیمت {symbol}: {e}")
+# ================= INDICATORS =================
+def sma(data, period):
+    if len(data) < period:
+        return None
+    return sum(data[-period:]) / period
+
+
+def rsi(data, period=14):
+    if len(data) < period + 1:
         return None
 
-def calculate_rsi(prices, period=14):
-    if len(prices) < period + 1:
-        return None
-    gains = [max(prices[i] - prices[i-1], 0) for i in range(1, len(prices))]
-    losses = [max(prices[i-1] - prices[i], 0) for i in range(1, len(prices))]
+    gains = []
+    losses = []
+
+    for i in range(1, len(data)):
+        diff = data[i] - data[i - 1]
+        gains.append(max(diff, 0))
+        losses.append(max(-diff, 0))
+
     avg_gain = sum(gains[-period:]) / period
     avg_loss = sum(losses[-period:]) / period
+
     if avg_loss == 0:
-        return 100.0
+        return 100
+
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
+
+# ================= DATA =================
+def get_price(symbol):
+    try:
+        return float(exchange.fetch_ticker(symbol)["last"])
+    except Exception as e:
+        logger.error(f"Price error {symbol}: {e}")
+        return None
+
+
+# ================= SIGNAL ENGINE =================
 def generate_signal(symbol, price):
-    history = price_histories[symbol]
+    history = price_history[symbol]
+
     history.append(price)
-    if len(history) > 200:
+    if len(history) > 300:
         history.pop(0)
 
     if len(history) < MA_LONG:
-        return "WARMUP", f"⏳ گرم شدن {symbol}..."
+        return None
 
-    ma_short = sum(history[-MA_SHORT:]) / MA_SHORT
-    ma_long = sum(history[-MA_LONG:]) / MA_LONG
-    rsi = calculate_rsi(history, RSI_PERIOD)
+    short = sma(history, MA_SHORT)
+    long = sma(history, MA_LONG)
+    r = rsi(history, RSI_PERIOD)
 
-    if ma_short > ma_long and rsi and rsi < 72:
-        return "BUY", f"🟢 <b>سیگنال خرید</b> {symbol}\nقیمت: <b>${price:,.2f}</b>\nMA{MA_SHORT}>{MA_LONG} | RSI: {rsi:.1f}"
-    elif ma_short < ma_long and rsi and rsi > 28:
-        return "SELL", f"🔴 <b>سیگنال فروش</b> {symbol}\nقیمت: <b>${price:,.2f}</b>\nMA{MA_SHORT}<{MA_LONG} | RSI: {rsi:.1f}"
-    
-    return "HOLD", None
+    if short is None or long is None or r is None:
+        return None
 
-async def send_message(text):
+    # LONG
+    if short > long and r < 70:
+        return build_signal(symbol, "LONG", price, r)
+
+    # SHORT
+    if short < long and r > 30:
+        return build_signal(symbol, "SHORT", price, r)
+
+    return None
+
+
+# ================= SIGNAL BUILDER =================
+def build_signal(symbol, direction, price, rsi_value):
+
+    is_long = direction == "LONG"
+
+    sl = price * (0.97 if is_long else 1.03)
+
+    tp = [
+        price * (1.02 if is_long else 0.98),
+        price * (1.04 if is_long else 0.96),
+        price * (1.06 if is_long else 0.94),
+        price * (1.08 if is_long else 0.92),
+    ]
+
+    confidence = 0.7
+
+    return {
+        "symbol": symbol,
+        "direction": direction,
+        "entry": "MARKET",
+        "risk": 0.03,
+        "leverage": 20,
+        "sl": sl,
+        "tp": tp,
+        "confidence": confidence,
+        "rsi": rsi_value
+    }
+
+
+# ================= FORMATTER =================
+def format_signal(s):
+    emoji = "🟢" if s["direction"] == "LONG" else "🔴"
+
+    tp_text = ""
+    for i, t in enumerate(s["tp"], 1):
+        tp_text += f"• TP{i}: {t:.2f}\n"
+
+    return f"""
+🚀 {s['symbol']}
+
+{emoji} {s['direction']} SIGNAL
+
+📍 Entry: {s['entry']}
+💰 Risk: {s['risk']*100:.1f}% | Leverage: x{s['leverage']}
+📊 RSI: {s['rsi']:.1f}
+🎯 Confidence: {s['confidence']*100:.0f}%
+
+━━━━━━━━━━━━━━━
+⛔ Stop Loss: {s['sl']:.2f}
+
+🎯 Take Profits:
+{tp_text}
+━━━━━━━━━━━━━━━
+🕒 {datetime.utcnow().strftime('%H:%M UTC')}
+""".strip()
+
+
+# ================= TELEGRAM =================
+async def send(text):
     try:
-        await bot.send_message(chat_id=CHAT_ID, text=text, parse_mode=ParseMode.HTML)
+        await bot.send_message(
+            chat_id=CHAT_ID,
+            text=text,
+            parse_mode=ParseMode.HTML
+        )
     except Exception as e:
-        logger.error(f"خطا ارسال: {e}")
+        logger.error(f"Telegram error: {e}")
 
-async def run_bot():
-    await send_message("✅ <b>ربات v3.1 با پیش‌بارگذاری تاریخچه فعال شد!</b>\nReal-time از Binance")
 
-    # پیش‌بارگذاری تاریخچه برای همه نمادها
-    for symbol in SYMBOLS:
-        preload_history(symbol)
-        await asyncio.sleep(1)  # جلوگیری از rate limit
-
-    await send_message("✅ تاریخچه بارگذاری شد. آماده ارسال سیگنال!")
+# ================= MAIN LOOP =================
+async def run():
+    await send("✅ Bot v4 ONLINE - Signal Engine Active")
 
     last_status = time.time()
 
     while True:
         for symbol in SYMBOLS:
-            try:
-                price = get_current_price(symbol)
-                if price is None:
-                    continue
+            price = get_price(symbol)
+            if not price:
+                continue
 
-                signal, msg = generate_signal(symbol, price)
+            signal = generate_signal(symbol, price)
 
-                if signal in ["BUY", "SELL"] and msg:
-                    await send_message(f"🚨 <b>سیگنال جدید!</b>\n\n{msg}")
+            if signal:
+                msg = format_signal(signal)
+                await send(f"🚨 NEW SIGNAL\n\n{msg}")
 
-                if time.time() - last_status >= STATUS_INTERVAL:
-                    status = f"📊 <b>گزارش وضعیت - {datetime.now().strftime('%H:%M')}</b>\n\n"
-                    for s in SYMBOLS:
-                        p = price_histories[s][-1] if price_histories[s] else "—"
-                        status += f"<b>{s}</b>: ${float(p):,.2f}\n"
-                    await send_message(status)
-                    last_status = time.time()
-
-            except Exception as e:
-                logger.error(f"خطا {symbol}: {e}")
+        # status update
+        if time.time() - last_status > STATUS_INTERVAL:
+            status = "📊 LIVE STATUS\n\n"
+            for s in SYMBOLS:
+                p = price_history[s][-1] if price_history[s] else 0
+                status += f"{s}: {p:.2f}\n"
+            await send(status)
+            last_status = time.time()
 
         await asyncio.sleep(INTERVAL)
 
+
+# ================= START =================
 if __name__ == "__main__":
     try:
-        asyncio.run(run_bot())
-    except KeyboardInterrupt:
-        logger.info("ربات متوقف شد.")
+        asyncio.run(run())
     except Exception as e:
-        logger.critical(f"خطای بحرانی: {e}")
+        logger.critical(f"Fatal error: {e}")
