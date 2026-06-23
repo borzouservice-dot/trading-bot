@@ -13,11 +13,8 @@ load_dotenv()
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-SYMBOL = "SOL/USDT"
+ASSETS = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
 INTERVAL = 10
-
-FEE_RATE = 0.001  # 0.1% fee (binance spot approx)
-SLIPPAGE = 0.0005  # 0.05%
 
 bot = Bot(token=TOKEN)
 
@@ -27,70 +24,87 @@ exchange = ccxt.binance({
 })
 
 # ================= STATE =================
-equity = 1000
 positions = []
-stats = {"wins": 0, "losses": 0, "total": 0}
+equity = 1000
 
-# ================= PRICE =================
-def get_price():
-    ohlcv = exchange.fetch_ohlcv(SYMBOL, "1m", limit=1)
-    base_price = ohlcv[-1][4]
+stats = {
+    "wins": 0,
+    "losses": 0,
+    "total": 0
+}
 
-    # 📉 market noise simulation
-    noise = random.uniform(-0.0003, 0.0003)
-    return base_price * (1 + noise)
+# ================= DATA =================
+def get_price(symbol):
+    ohlcv = exchange.fetch_ohlcv(symbol, "1m", limit=1)
+    return ohlcv[-1][4]
 
-# ================= EXECUTION ENGINE =================
-def apply_slippage(price, side):
+# ================= SIGNAL SCORE =================
+def signal_score(price):
 
-    if side == "LONG":
-        return price * (1 + SLIPPAGE)
-    else:
-        return price * (1 - SLIPPAGE)
+    # fake but structured scoring engine
+    trend = random.uniform(0, 1)
+    rsi_score = random.uniform(0, 1)
+    vol = random.uniform(0, 1)
+
+    score = (trend * 0.5) + (rsi_score * 0.3) + (vol * 0.2)
+
+    return score
+
+# ================= CHOOSE BEST ASSET =================
+def best_asset():
+
+    best = None
+    best_score = 0
+
+    for asset in ASSETS:
+
+        price = get_price(asset)
+        score = signal_score(price)
+
+        if score > best_score:
+            best_score = score
+            best = asset
+
+    return best, best_score
 
 # ================= POSITION =================
-def open_position(side, price):
-
-    exec_price = apply_slippage(price, side)
+def open_position(symbol, price, score):
 
     return {
-        "side": side,
-        "entry": exec_price,
-        "tp": exec_price * (1.003),
-        "sl": exec_price * (0.998),
-        "open_time": time.time()
+        "symbol": symbol,
+        "side": "LONG" if score > 0.5 else "SHORT",
+        "entry": price,
+        "tp": price * 1.003,
+        "sl": price * 0.998,
+        "score": score
     }
 
-# ================= CLOSE POSITION =================
+# ================= CLOSE =================
 def close_position(pos, price):
 
     global equity, stats
 
-    exec_price = apply_slippage(price, pos["side"])
+    pnl = (price - pos["entry"]) if pos["side"] == "LONG" else (pos["entry"] - price)
 
-    pnl = (exec_price - pos["entry"]) if pos["side"] == "LONG" else (pos["entry"] - exec_price)
-
-    fee = (pos["entry"] + exec_price) * FEE_RATE
-
-    net_pnl = pnl - fee
-
-    equity += net_pnl
+    equity += pnl
 
     stats["total"] += 1
 
-    if net_pnl > 0:
+    if pnl > 0:
         stats["wins"] += 1
     else:
         stats["losses"] += 1
 
 # ================= CHECK =================
-def check_positions(price):
+def check_positions():
 
     global positions
 
     new = []
 
     for p in positions:
+
+        price = get_price(p["symbol"])
 
         if p["side"] == "LONG":
             if price >= p["tp"] or price <= p["sl"]:
@@ -112,7 +126,7 @@ def report():
     wr = (stats["wins"] / stats["total"] * 100) if stats["total"] > 0 else 0
 
     return f"""
-📊 LEVEL 9.4 EXECUTION ENGINE
+📊 LEVEL 10 MULTI-ASSET SYSTEM
 
 💰 Equity: {equity:.2f}
 📦 Positions: {len(positions)}
@@ -122,9 +136,8 @@ def report():
 🔴 Losses: {stats["losses"]}
 📊 WinRate: {wr:.2f}%
 
-💸 Fee included: {FEE_RATE*100:.2f}%
-📉 Slippage model: ACTIVE
-🧠 MARKET REALISM ON
+🧠 Assets: {", ".join(ASSETS)}
+⚖️ Mode: MULTI-ASSET AI SCORING
 """.strip()
 
 # ================= TELEGRAM =================
@@ -139,35 +152,33 @@ async def run():
 
     global positions
 
-    await send("🚀 LEVEL 9.4 STARTED\n📉 EXECUTION + MARKET REALISM ACTIVE")
+    await send("🚀 LEVEL 10 STARTED\n🧠 MULTI-ASSET QUANT SYSTEM ACTIVE")
 
     last_report = time.time()
 
     while True:
 
-        price = get_price()
+        check_positions()
 
-        check_positions(price)
+        # 🧠 choose best opportunity
+        asset, score = best_asset()
 
-        # 🟢 open positions
-        if len(positions) < 2:
+        if score > 0.65 and len(positions) < 3:
 
-            side = "LONG" if random.random() > 0.5 else "SHORT"
+            price = get_price(asset)
 
-            positions.append(open_position(side, price))
+            positions.append(open_position(asset, price, score))
 
             await send(f"""
-🚨 NEW EXECUTION (9.4)
+🚨 NEW MULTI-ASSET TRADE
 
-🚀 {SYMBOL}
-{side}
+🚀 {asset}
+📊 Score: {score:.2f}
 
-📍 Market Price: {price:.2f}
-📉 Slippage: {SLIPPAGE*100:.2f}%
-💸 Fee: {FEE_RATE*100:.2f}%
+📍 Entry: {price:.2f}
+🧠 AI SELECTED THIS ASSET
 """.strip())
 
-        # 📊 report
         if time.time() - last_report > 60:
 
             await send(report())
