@@ -13,7 +13,7 @@ TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 SYMBOL = "SOL/USDT"
-INTERVAL = 10  # 🔥 faster for live monitoring
+INTERVAL = 10
 
 bot = Bot(token=TOKEN)
 
@@ -23,71 +23,98 @@ exchange = ccxt.binance({
 })
 
 # ================= STATE =================
-active_trade = None
-last_update_time = 0
+positions = []
+history = []
 
-# ================= DATA =================
+equity = 1000  # starting capital
+
+stats = {
+    "wins": 0,
+    "losses": 0,
+    "total": 0
+}
+
+# ================= PRICE =================
 def get_price():
     ohlcv = exchange.fetch_ohlcv(SYMBOL, "1m", limit=1)
     return ohlcv[-1][4]
 
-# ================= TRADE =================
-def open_trade(side, price):
+# ================= POSITION =================
+def open_position(side, price):
+
     return {
         "side": side,
         "entry": price,
-        "tp1": price * (1.002),
-        "tp2": price * (1.006),
-        "sl": price * (0.998 if side == "LONG" else 1.002),
-        "trail": None,
-        "tp1_hit": False
+        "tp": price * (1.003),
+        "sl": price * (0.998),
+        "size": equity * 0.1,  # 10% risk
+        "open_time": time.time()
     }
 
-def pnl(trade, price):
-    if trade["side"] == "LONG":
-        return price - trade["entry"]
+# ================= CLOSE =================
+def close_position(pos, price):
+
+    global equity, stats, history
+
+    pnl = (price - pos["entry"]) if pos["side"] == "LONG" else (pos["entry"] - price)
+
+    equity += pnl
+
+    stats["total"] += 1
+
+    if pnl > 0:
+        stats["wins"] += 1
     else:
-        return trade["entry"] - price
+        stats["losses"] += 1
 
-# ================= TRAILING =================
-def update_trailing(trade, price):
-    if trade["side"] == "LONG":
-        if price > trade["entry"] * 1.002:
-            trade["trail"] = price * 0.999
+    history.append({
+        "side": pos["side"],
+        "entry": pos["entry"],
+        "exit": price,
+        "pnl": pnl
+    })
 
-    else:
-        if price < trade["entry"] * 0.998:
-            trade["trail"] = price * 1.001
+# ================= CHECK POSITIONS =================
+def check_positions(price):
 
-# ================= STATUS =================
-def trade_status(trade, price):
+    global positions
 
-    profit = pnl(trade, price)
+    new_positions = []
 
-    if profit > 0:
-        status = "IN PROFIT 🟢"
-    elif profit < 0:
-        status = "IN LOSS 🔴"
-    else:
-        status = "BREAK EVEN ⚪"
+    for p in positions:
 
-    tp1_progress = abs((price - trade["entry"]) / (trade["tp1"] - trade["entry"])) * 100
+        if p["side"] == "LONG":
+
+            if price >= p["tp"] or price <= p["sl"]:
+                close_position(p, price)
+                continue
+
+        else:
+
+            if price <= p["tp"] or price >= p["sl"]:
+                close_position(p, price)
+                continue
+
+        new_positions.append(p)
+
+    positions = new_positions
+
+# ================= STATS =================
+def report():
+
+    wr = (stats["wins"] / stats["total"] * 100) if stats["total"] > 0 else 0
 
     return f"""
-📊 LIVE TRADE STATUS (9.1)
+📊 PORTFOLIO REPORT (9.2)
 
-{trade['side']} {status}
+💰 Equity: {equity:.2f}
+📦 Open Positions: {len(positions)}
+📈 Total Trades: {stats["total"]}
+🟢 Wins: {stats["wins"]}
+🔴 Losses: {stats["losses"]}
+📊 WinRate: {wr:.2f}%
 
-📍 Entry: {trade['entry']:.2f}
-💰 Price: {price:.2f}
-📈 PnL: {profit:.4f}
-
-🎯 TP1 Progress: {tp1_progress:.1f}%
-
-🛡 SL: {trade['sl']:.2f}
-📉 Trail: {trade['trail'] if trade['trail'] else 'OFF'}
-
-🧠 LIVE EXECUTION MODE
+🧠 SYSTEM: MULTI-POSITION ACTIVE
 """.strip()
 
 # ================= TELEGRAM =================
@@ -100,35 +127,39 @@ async def send(msg):
 # ================= LOOP =================
 async def run():
 
-    global active_trade, last_update_time
+    global positions
 
-    await send("🚀 LEVEL 9.1 STARTED\n📊 LIVE TRADE MONITOR ACTIVE")
+    await send("🚀 LEVEL 9.2 STARTED\n📊 PORTFOLIO ENGINE ACTIVE")
+
+    last_report = time.time()
 
     while True:
 
         price = get_price()
 
-        # 🟢 open trade once
-        if not active_trade:
-            active_trade = open_trade("LONG", price)
+        check_positions(price)
+
+        # 🟢 open new positions (demo logic)
+        if len(positions) < 3:
+            side = "LONG" if price % 2 > 1 else "SHORT"
+
+            positions.append(open_position(side, price))
 
             await send(f"""
-🚨 TRADE OPEN (9.1)
+🚨 NEW POSITION (9.2)
 
 🚀 {SYMBOL}
-🟢 LONG
+{side}
 
 📍 Entry: {price:.2f}
+📦 Size: 10% equity
 """.strip())
 
-        # 📊 update live every few seconds
-        if active_trade and time.time() - last_update_time > 10:
+        # 📊 periodic report
+        if time.time() - last_report > 60:
 
-            update_trailing(active_trade, price)
-
-            await send(trade_status(active_trade, price))
-
-            last_update_time = time.time()
+            await send(report())
+            last_report = time.time()
 
         await asyncio.sleep(INTERVAL)
 
