@@ -17,6 +17,7 @@ CHAT_ID = os.getenv("CHAT_ID")
 
 SYMBOLS = ["SOL/USDT", "BTC/USDT", "ETH/USDT"]
 INTERVAL = 30
+REPORT_INTERVAL = 600
 
 bot = Bot(token=TOKEN)
 
@@ -26,7 +27,7 @@ exchange = ccxt.binance({
 })
 
 logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("V4_HEDGE")
+log = logging.getLogger("V4.1_PRO")
 
 # ================= STATE =================
 @dataclass
@@ -44,119 +45,90 @@ class Portfolio:
         self.positions = {}
         self.trades = []
         self.equity = [1000.0]
+        self.last_signal = {}
 
 portfolio = Portfolio()
+
+# ================= TELEGRAM =================
+def send(msg):
+    try:
+        bot.send_message(chat_id=CHAT_ID, text=msg)
+    except Exception as e:
+        log.error(f"Telegram error: {e}")
 
 # ================= DATA =================
 def get_data(symbol):
     df = exchange.fetch_ohlcv(symbol, "1m", limit=200)
     df = pd.DataFrame(df, columns=["t","o","h","l","c","v"])
-    df[["o","h","l","c","v"]] = df[["o","h","l","c","v"]].astype(float)
+    df["c"] = df["c"].astype(float)
     return df
 
-# ================= LAYER 1: TREND =================
-def trend_score(df):
-    ema50 = df["c"].ewm(50).mean().iloc[-1]
-    ema200 = df["c"].ewm(200).mean().iloc[-1]
-
-    if ema50 > ema200:
-        return 1
-    elif ema50 < ema200:
-        return -1
-    return 0
-
-# ================= LAYER 2: MOMENTUM =================
-def momentum_score(df):
-    rsi = 100 - (100 / (1 + df["c"].pct_change().rolling(14).mean()))
-    rsi_val = rsi.iloc[-1]
-
-    roc = df["c"].pct_change(5).iloc[-1]
-
-    score = 0
-
-    if rsi_val > 55:
-        score += 1
-    elif rsi_val < 45:
-        score -= 1
-
-    if roc > 0:
-        score += 1
-    else:
-        score -= 1
-
-    return score
-
-# ================= LAYER 3: LIQUIDITY =================
-def liquidity_score(df):
-    high = df["h"].rolling(20).max().iloc[-1]
-    low = df["l"].rolling(20).min().iloc[-1]
-    price = df["c"].iloc[-1]
-
-    if price > high * 1.002:
-        return -1
-    if price < low * 0.998:
-        return -1
-
-    return 1
-
-# ================= LAYER 4: VOLUME =================
-def volume_score(df):
-    v = df["v"]
-    if v.iloc[-1] > v.rolling(20).mean().iloc[-1]:
-        return 1
-    return 0
-
-# ================= FINAL SCORE =================
-def final_score(df):
-    t = trend_score(df)
-    m = momentum_score(df)
-    l = liquidity_score(df)
-    v = volume_score(df)
-
-    score = (t * 35) + (m * 25) + (l * 25) + (v * 15)
-    return score
-
 # ================= STRATEGY =================
-def strategy(symbol):
-    df = get_data(symbol)
+def strategy(df):
     price = df["c"].iloc[-1]
 
-    score = final_score(df)
+    ema9 = df["c"].ewm(span=9).mean().iloc[-1]
+    ema21 = df["c"].ewm(span=21).mean().iloc[-1]
 
-    if score > 50:
+    vol = df["c"].pct_change().tail(30).std()
+
+    score = 50
+
+    if ema9 > ema21:
+        score += 30
         signal = "LONG"
-    elif score < -50:
-        signal = "SHORT"
     else:
+        score -= 30
+        signal = "SHORT"
+
+    if vol < 0.0018:
+        score += 15
+    elif vol > 0.004:
+        score -= 20
+
+    if score < 70:
         signal = "WAIT"
 
     return signal, score, price
 
-# ================= RISK =================
-def position_size(balance, price):
-    risk = balance * 0.01
-    return risk / price
-
-# ================= EXECUTION =================
-def execute(symbol, signal, price):
+# ================= POSITION =================
+def open_position(symbol, signal, price):
     if symbol in portfolio.positions:
         return
 
-    if signal == "WAIT":
-        return
+    sl = price * (0.99 if signal == "LONG" else 1.01)
+    tp = price * (1.03 if signal == "LONG" else 0.97)
 
-    size = position_size(portfolio.balance, price)
+    portfolio.positions[symbol] = Position(symbol, price, 10, signal, sl, tp)
 
-    if signal == "LONG":
-        sl = price * 0.99
-        tp = price * 1.03
-    else:
-        sl = price * 1.01
-        tp = price * 0.97
+    send(f"""
+🚀 OPEN POSITION
 
-    portfolio.positions[symbol] = Position(symbol, price, size, signal, sl, tp)
+Symbol: {symbol}
+Side: {signal}
+Entry: {price:.2f}
+SL: {sl:.2f}
+TP: {tp:.2f}
+""")
 
-    log.info(f"OPEN {symbol} {signal} @ {price:.2f} | SCORE")
+def close_position(symbol, price, reason):
+    pos = portfolio.positions[symbol]
+
+    pnl = (price - pos.entry) * pos.size if pos.side == "LONG" else (pos.entry - price) * pos.size
+
+    portfolio.balance += pnl
+    portfolio.trades.append(pnl)
+
+    del portfolio.positions[symbol]
+
+    send(f"""
+❌ CLOSE POSITION ({reason})
+
+Symbol: {symbol}
+Side: {pos.side}
+PnL: {pnl:.2f}
+Balance: {portfolio.balance:.2f}
+""")
 
 # ================= MANAGE =================
 def manage(symbol, price):
@@ -166,34 +138,66 @@ def manage(symbol, price):
     pos = portfolio.positions[symbol]
 
     if pos.side == "LONG":
-        pnl = (price - pos.entry) * pos.size
-        if price <= pos.sl or price >= pos.tp:
-            close(symbol, price, pnl)
+        if price <= pos.sl:
+            close_position(symbol, price, "SL")
+        elif price >= pos.tp:
+            close_position(symbol, price, "TP")
+
     else:
-        pnl = (pos.entry - price) * pos.size
-        if price >= pos.sl or price <= pos.tp:
-            close(symbol, price, pnl)
+        if price >= pos.sl:
+            close_position(symbol, price, "SL")
+        elif price <= pos.tp:
+            close_position(symbol, price, "TP")
 
-def close(symbol, price, pnl):
-    portfolio.balance += pnl
-    portfolio.trades.append(pnl)
-    portfolio.equity.append(portfolio.balance)
-    del portfolio.positions[symbol]
+# ================= SIGNAL CONTROL =================
+def signal_controller(symbol, signal):
+    last = portfolio.last_signal.get(symbol)
 
-    log.info(f"CLOSE {symbol} PnL:{pnl:.2f}")
+    # فقط اگر تغییر کرده باشد
+    if last == signal:
+        return False
+
+    portfolio.last_signal[symbol] = signal
+    return True
 
 # ================= LOOP =================
 async def run():
-    log.info("🚀 V4 HEDGE FUND STARTED")
+    send("🚀 V4.1 PRO STARTED")
+
+    last_report = time.time()
 
     while True:
-        for s in SYMBOLS:
-            signal, score, price = strategy(s)
+        try:
+            for s in SYMBOLS:
 
-            manage(s, price)
-            execute(s, signal, price)
+                df = get_data(s)
+                signal, score, price = strategy(df)
 
-            log.info(f"{s} | {signal} | {score:.1f} | {price:.2f}")
+                manage(s, price)
+
+                # signal change filter
+                if signal_controller(s, signal):
+
+                    log.info(f"NEW SIGNAL {s} {signal}")
+
+                    if signal != "WAIT":
+                        open_position(s, signal, price)
+
+                log.info(f"{s} | {signal} | {score:.1f} | {price:.2f}")
+
+            # periodic report
+            if time.time() - last_report > REPORT_INTERVAL:
+                send(f"""
+📊 V4.1 REPORT
+
+Balance: {portfolio.balance:.2f}
+Open Positions: {len(portfolio.positions)}
+Trades: {len(portfolio.trades)}
+""")
+                last_report = time.time()
+
+        except Exception as e:
+            log.error(f"Loop error: {e}")
 
         await asyncio.sleep(INTERVAL)
 
