@@ -28,12 +28,12 @@ exchange = ccxt.binance({
 })
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-log = logging.getLogger("LEVEL24.3")
+log = logging.getLogger("LEVEL25")
 
-# ================= SAFE CAST ENGINE =================
+# ================= SAFE CAST =================
 def f(x):
     try:
-        if isinstance(x, (pd.Series, pd.DataFrame)):
+        if isinstance(x, pd.Series):
             x = x.iloc[-1]
         if isinstance(x, np.ndarray):
             x = x.item()
@@ -50,7 +50,6 @@ class Position:
     side: str
     sl: float
     tp: float
-    trailing_sl: float
 
 class Portfolio:
     def __init__(self):
@@ -66,33 +65,41 @@ def get_data(symbol):
     try:
         ohlcv = exchange.fetch_ohlcv(symbol, "1m", limit=200)
         df = pd.DataFrame(ohlcv, columns=["t","o","h","l","c","v"])
-
-        df = df.apply(pd.to_numeric, errors="coerce")
-        df = df.dropna()
-
+        df = df.apply(pd.to_numeric, errors="coerce").dropna()
         return df
-    except Exception as e:
-        log.error(f"DATA ERROR {symbol}: {e}")
+    except:
         return pd.DataFrame()
 
-# ================= ATR (FIXED 100%) =================
-def atr(df, period=14):
-    if df.empty or len(df) < period + 2:
+# ================= ATR =================
+def atr(df):
+    if df.empty or len(df) < 20:
         return 0.0
 
-    high = df["h"]
-    low = df["l"]
-    close = df["c"]
+    h = df["h"]
+    l = df["l"]
+    c = df["c"]
 
-    tr1 = high - low
-    tr2 = (high - close.shift(1)).abs()
-    tr3 = (low - close.shift(1)).abs()
+    tr = pd.concat([
+        h - l,
+        (h - c.shift()).abs(),
+        (l - c.shift()).abs()
+    ], axis=1).max(axis=1)
 
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    val = tr.rolling(14).mean().iloc[-1]
+    return f(val if not np.isnan(val) else df["c"].iloc[-1] * 0.01)
 
-    val = tr.rolling(period).mean().iloc[-1]
+# ================= REGIME DETECTION (NEW CORE) =================
+def market_regime(df):
+    ema_fast = df["c"].ewm(10).mean().iloc[-1]
+    ema_slow = df["c"].ewm(30).mean().iloc[-1]
+    volatility = df["c"].pct_change().tail(30).std()
 
-    return f(val if not np.isnan(val) else df["c"].iloc[-1] * 0.015)
+    if abs(ema_fast - ema_slow) / ema_slow > 0.002:
+        if volatility < 0.004:
+            return "TREND"
+        else:
+            return "VOLATILE_TREND"
+    return "CHOP"
 
 # ================= STRATEGY =================
 def strategy(df):
@@ -101,35 +108,45 @@ def strategy(df):
 
     price = f(df["c"].iloc[-1])
 
-    ema9 = f(df["c"].ewm(span=9).mean().iloc[-1])
-    ema21 = f(df["c"].ewm(span=21).mean().iloc[-1])
+    ema9 = f(df["c"].ewm(9).mean().iloc[-1])
+    ema21 = f(df["c"].ewm(21).mean().iloc[-1])
+
     vol = f(df["c"].pct_change().tail(30).std())
 
-    score = 50
+    regime = market_regime(df)
 
+    score = 50
+    signal = "WAIT"
+
+    # trend logic
     if ema9 > ema21:
-        score += 30
+        score += 25
         signal = "LONG"
     else:
-        score -= 30
+        score -= 25
         signal = "SHORT"
 
-    if vol < 0.0018:
-        score += 10
-    elif vol > 0.0045:
-        score -= 15
+    # regime filter (IMPORTANT)
+    if regime == "CHOP":
+        score -= 25
+    elif regime == "VOLATILE_TREND":
+        score -= 10
 
-    if score < 65:
+    # volatility filter
+    if vol < 0.0015:
+        score += 10
+    elif vol > 0.005:
+        score -= 20
+
+    # final gate
+    if score < 70:
         signal = "WAIT"
 
-    return signal, f(score), price
+    return signal, f(score), price, regime
 
-# ================= POSITION MANAGEMENT =================
+# ================= POSITION =================
 def open_position(symbol, signal, price, atr_val):
-    if symbol in portfolio.positions:
-        return
-
-    if atr_val <= 0:
+    if symbol in portfolio.positions or atr_val <= 0:
         return
 
     size = max(5.0, (0.01 * portfolio.balance) / atr_val)
@@ -137,9 +154,7 @@ def open_position(symbol, signal, price, atr_val):
     sl = price - atr_val * 2 if signal == "LONG" else price + atr_val * 2
     tp = price + atr_val * 3 if signal == "LONG" else price - atr_val * 3
 
-    portfolio.positions[symbol] = Position(
-        symbol, price, size, signal, sl, tp, sl
-    )
+    portfolio.positions[symbol] = Position(symbol, price, size, signal, sl, tp)
 
     log.info(f"OPEN {symbol} {signal} @ {price:.2f}")
 
@@ -155,26 +170,18 @@ def close_position(symbol, price, reason):
 
     del portfolio.positions[symbol]
 
-    log.info(f"CLOSE {symbol} | {reason} | PnL={pnl:.2f}")
+    log.info(f"CLOSE {symbol} {reason} PnL:{pnl:.2f}")
 
-def manage_positions(df, symbol):
+def manage(df, symbol):
     if symbol not in portfolio.positions or df.empty:
         return
 
     price = f(df["c"].iloc[-1])
     pos = portfolio.positions[symbol]
-    atr_val = atr(df)
-
-    if pos.side == "LONG":
-        pos.sl = max(pos.sl, price - atr_val * 2)
-    else:
-        pos.sl = min(pos.sl, price + atr_val * 2)
 
     if (pos.side == "LONG" and price <= pos.sl) or (pos.side == "SHORT" and price >= pos.sl):
         close_position(symbol, price, "SL")
-        return
-
-    if (pos.side == "LONG" and price >= pos.tp) or (pos.side == "SHORT" and price <= pos.tp):
+    elif (pos.side == "LONG" and price >= pos.tp) or (pos.side == "SHORT" and price <= pos.tp):
         close_position(symbol, price, "TP")
 
 # ================= METRICS =================
@@ -182,29 +189,28 @@ def metrics():
     if not portfolio.trades:
         return 0.0, 0.0, portfolio.balance
 
-    wins = [t for t in portfolio.trades if t > 0]
-    winrate = len(wins) / len(portfolio.trades)
+    win = len([x for x in portfolio.trades if x > 0])
+    wr = win / len(portfolio.trades)
 
     eq = np.array(portfolio.equity)
-    peak = np.maximum.accumulate(eq)
-    dd = np.max(peak - eq)
+    dd = np.max(np.maximum.accumulate(eq) - eq)
 
-    return winrate, dd, portfolio.balance
+    return wr, dd, portfolio.balance
 
 # ================= DASHBOARD =================
 def dashboard():
     wr, dd, bal = metrics()
 
     return f"""
-🚀 LEVEL 24.3 STABLE ENGINE
+🚀 LEVEL 25 SMART REGIME ENGINE
 
 💰 Balance: {bal:.2f}
 🟢 WinRate: {wr:.1%}
-📉 Max DD: {dd:.2f}
-📦 Trades: {len(portfolio.trades)}
-📊 Open: {len(portfolio.positions)}
+📉 Drawdown: {dd:.2f}
 
-STATUS: STABLE + NO CRASH
+📊 Positions: {len(portfolio.positions)}
+
+🧠 STATUS: REGIME-AWARE AI ACTIVE
 """
 
 # ================= TELEGRAM =================
@@ -214,9 +220,9 @@ async def send(msg):
     except Exception as e:
         log.error(e)
 
-# ================= MAIN LOOP =================
+# ================= LOOP =================
 async def run():
-    await send("🚀 LEVEL 24.3 STARTED")
+    await send("🚀 LEVEL 25 STARTED")
 
     last_report = time.time()
 
@@ -225,15 +231,15 @@ async def run():
             for symbol in SYMBOLS:
 
                 df = get_data(symbol)
-                signal, score, price = strategy(df)
+                signal, score, price, regime = strategy(df)
                 atr_val = atr(df)
 
-                manage_positions(df, symbol)
+                manage(df, symbol)
 
                 if signal != "WAIT":
                     open_position(symbol, signal, price, atr_val)
 
-                log.info(f"{symbol} | {signal} | {score:.1f} | {price:.2f} | BAL:{portfolio.balance:.2f}")
+                log.info(f"{symbol} | {signal} | {score} | {price:.2f} | {regime} | BAL:{portfolio.balance:.2f}")
 
             if time.time() - last_report > REPORT_INTERVAL:
                 await send(dashboard())
