@@ -1,102 +1,178 @@
 import ccxt
+import asyncio
 import pandas as pd
 import numpy as np
 import logging
-import traceback
+from telegram import Bot
+from telegram.constants import ParseMode
+from dotenv import load_dotenv
+import os
 
-# ================= LOGGING =================
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s")
-log = logging.getLogger("LEVEL23-FIX")
+# ================= CONFIG =================
+load_dotenv()
 
-SYMBOL = "SOL/USDT"
-TIMEFRAME = "1m"
+TOKEN = os.getenv("TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+
+SYMBOLS = ["SOL/USDT", "BTC/USDT", "ETH/USDT"]
+INTERVAL = 10
+
+bot = Bot(token=TOKEN)
 
 exchange = ccxt.binance({
     "enableRateLimit": True,
     "options": {"defaultType": "spot"}
 })
 
-# ================= SAFE DATA =================
-def load_data():
-    try:
-        log.info("📡 Fetching market data...")
+# ================= LOG =================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(message)s"
+)
 
-        ohlcv = exchange.fetch_ohlcv(SYMBOL, TIMEFRAME, limit=200)
+log = logging.getLogger("LEVEL22")
 
-        if not ohlcv:
-            log.error("❌ EMPTY DATA FROM EXCHANGE")
-            return None
+# ================= DATA =================
+def get_data(symbol, limit=150):
+    ohlcv = exchange.fetch_ohlcv(symbol, "1m", limit=limit)
+    return pd.DataFrame(ohlcv, columns=["t","o","h","l","c","v"])
 
-        df = pd.DataFrame(ohlcv, columns=["t","o","h","l","c","v"])
+# ================= SIMPLE STRATEGY CORE =================
+def strategy_score(df):
 
-        log.info(f"📊 Data OK: {len(df)} rows")
+    price = df["c"].iloc[-1]
 
-        return df
+    ema_fast = df["c"].ewm(span=9).mean().iloc[-1]
+    ema_slow = df["c"].ewm(span=21).mean().iloc[-1]
 
-    except Exception as e:
-        log.error(f"❌ DATA ERROR: {e}")
-        return None
+    returns = df["c"].pct_change()
+    vol = returns.std()
 
-# ================= SIMPLE SAFE MODEL =================
-def simple_score(df):
+    score = 50
 
-    try:
-        df["ret"] = df["c"].pct_change()
-        df["ema9"] = df["c"].ewm(span=9).mean()
-        df["ema21"] = df["c"].ewm(span=21).mean()
+    if ema_fast > ema_slow:
+        score += 20
+    else:
+        score -= 20
 
-        last = df.iloc[-1]
+    if vol < 0.002:
+        score += 10
+    else:
+        score -= 10
 
-        score = 50
+    if price > df["h"].rolling(20).mean().iloc[-1]:
+        score += 10
 
-        if last["ema9"] > last["ema21"]:
-            score += 20
-        else:
-            score -= 20
+    if price < df["l"].rolling(20).mean().iloc[-1]:
+        score -= 10
 
-        if df["ret"].std() < 0.01:
-            score += 10
-        else:
-            score -= 10
-
+    if score >= 70:
+        signal = "LONG"
+    elif score <= 30:
+        signal = "SHORT"
+    else:
         signal = "WAIT"
-        if score > 65:
-            signal = "LONG"
-        elif score < 35:
-            signal = "SHORT"
 
-        return signal, score, float(last["c"])
+    return signal, score, price
 
+# ================= BACKTEST LIGHT (rolling win estimate) =================
+def pseudo_backtest(df):
+
+    closes = df["c"]
+    returns = closes.pct_change()
+
+    win_rate = (returns > 0).rolling(20).mean().iloc[-1]
+
+    return float(win_rate)
+
+# ================= ANALYZE ALL SYMBOLS =================
+def analyze_all():
+
+    results = []
+
+    for symbol in SYMBOLS:
+
+        df = get_data(symbol)
+
+        signal, score, price = strategy_score(df)
+        win_rate = pseudo_backtest(df)
+
+        results.append({
+            "symbol": symbol,
+            "signal": signal,
+            "score": score,
+            "price": price,
+            "win_rate": win_rate
+        })
+
+    return sorted(results, key=lambda x: x["score"], reverse=True)
+
+# ================= FORMAT =================
+def format_report(best, all_results):
+
+    msg = f"""
+🚀 LEVEL 22 AI PORTFOLIO ENGINE
+
+🏆 BEST SETUP:
+{best['symbol']}
+
+{ "🟢 LONG" if best['signal']=="LONG" else "🔴 SHORT" if best['signal']=="SHORT" else "⚪ WAIT" }
+
+📍 Price: {best['price']:.2f}
+🧠 Score: {best['score']}/100
+📊 Win Est: {best['win_rate']:.2f}
+
+------------------------
+
+📊 ALL MARKETS:
+
+"""
+
+    for r in all_results:
+        msg += f"""
+• {r['symbol']}
+  ➜ {r['signal']} | {r['score']} | WR:{r['win_rate']:.2f}
+"""
+
+    msg += "\n📡 Mode: PORTFOLIO AI DECISION ENGINE"
+
+    return msg.strip()
+
+# ================= TELEGRAM =================
+async def send(msg):
+    try:
+        await bot.send_message(CHAT_ID, msg, parse_mode=ParseMode.HTML)
     except Exception as e:
-        log.error(f"❌ MODEL ERROR: {e}")
-        log.error(traceback.format_exc())
-        return "WAIT", 50, 0
+        log.error(e)
 
-# ================= RUN =================
-def run():
+# ================= LOOP =================
+async def run():
 
-    log.info("🚀 LEVEL 23 FIX STARTED")
+    await send("🚀 LEVEL 22 STARTED\n🧠 MULTI-ASSET AI PORTFOLIO ENGINE")
 
-    df = load_data()
+    last_best = None
 
-    if df is None or len(df) < 50:
-        log.warning("⚠️ Not enough data → SAFE EXIT")
-        print("LEVEL 23: NO DATA BUT SYSTEM IS RUNNING 🟡")
-        return
+    while True:
 
-    signal, score, price = simple_score(df)
+        try:
 
-    print("\n======================")
-    print("🚀 LEVEL 23 OUTPUT")
-    print("======================")
-    print(f"Symbol: {SYMBOL}")
-    print(f"Signal: {signal}")
-    print(f"Score: {score}")
-    print(f"Price: {price}")
-    print("======================\n")
+            results = analyze_all()
+            best = results[0]
 
-    log.info("✅ LEVEL 23 DONE")
+            log.info(f"BEST: {best['symbol']} | {best['score']}")
+
+            if last_best != best["symbol"]:
+
+                msg = format_report(best, results)
+                await send(msg)
+
+                last_best = best["symbol"]
+
+        except Exception as e:
+            log.error(f"ERROR: {e}")
+
+        await asyncio.sleep(INTERVAL)
 
 # ================= START =================
 if __name__ == "__main__":
-    run()
+    asyncio.run(run())
