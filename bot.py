@@ -27,32 +27,19 @@ exchange = ccxt.binance({
 
 # ================= LOG =================
 logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("LEVEL23.6")
+log = logging.getLogger("LEVEL23.7")
 
 # ================= STATE =================
 balance = 1000.0
-trades = []
+
+trades = []          # +1 win / -1 loss
 equity = [balance]
+signals_log = []
 
 # ================= DATA =================
 def get_data():
     ohlcv = exchange.fetch_ohlcv(SYMBOL, "1m", limit=200)
     return pd.DataFrame(ohlcv, columns=["t","o","h","l","c","v"])
-
-# ================= CHOP FILTER =================
-def market_regime(df):
-
-    atr = (df["h"] - df["l"]).rolling(14).mean().iloc[-1]
-    body = abs(df["c"] - df["o"]).rolling(14).mean().iloc[-1]
-
-    trend_strength = body / atr if atr != 0 else 0
-
-    if trend_strength > 0.6:
-        return "TREND"
-    elif trend_strength < 0.3:
-        return "CHOP"
-    else:
-        return "NEUTRAL"
 
 # ================= STRATEGY =================
 def strategy(df):
@@ -64,20 +51,13 @@ def strategy(df):
 
     vol = df["c"].pct_change().std()
 
-    regime = market_regime(df)
-
     score = 50
-    signal = "WAIT"
-
-    # ❌ NO TRADE IN CHOP MARKET
-    if regime == "CHOP":
-        return "WAIT", 0, price, regime
 
     if ema9 > ema21:
-        score += 30
+        score += 25
         signal = "LONG"
     else:
-        score -= 30
+        score -= 25
         signal = "SHORT"
 
     if vol < 0.002:
@@ -88,52 +68,80 @@ def strategy(df):
     if score < 65:
         signal = "WAIT"
 
-    return signal, score, price, regime
+    return signal, score, price
 
 # ================= SIM TRADE =================
-def simulate(signal):
+def simulate_trade(signal):
 
     if signal == "WAIT":
-        return 0
+        return 0, "WAIT"
 
-    move = np.random.normal(0.0018, 0.007)
+    move = np.random.normal(0.0015, 0.008)
 
-    return 10 * (move * 100)
+    pnl = 10 * (move * 100)
+
+    if pnl > 0:
+        return 1, signal   # win
+    else:
+        return -1, signal  # loss
 
 # ================= METRICS =================
-def stats_calc():
+def metrics():
 
     if len(trades) == 0:
-        return 0, 0
+        return 0, 0, 0
 
-    winrate = len([t for t in trades if t > 0]) / len(trades)
+    winrate = len([t for t in trades if t == 1]) / len(trades)
 
-    expectancy = np.mean(trades)
+    equity_arr = np.array(equity)
 
-    return winrate, expectancy
+    peak = np.maximum.accumulate(equity_arr)
+    drawdown = peak - equity_arr
+    max_dd = float(np.max(drawdown))
+
+    return winrate, max_dd, equity_arr[-1]
+
+# ================= PERFORMANCE SCORE =================
+def performance_score(winrate, max_dd):
+
+    score = 50
+
+    score += winrate * 40
+    score -= max_dd * 0.5
+
+    return max(0, min(100, score))
 
 # ================= DASHBOARD =================
-def dashboard(score, regime):
+def dashboard(score, signal, price):
 
-    winrate, expectancy = stats_calc()
+    winrate, max_dd, eq = metrics()
+    perf = performance_score(winrate, max_dd)
+
+    long_count = signals_log.count("LONG")
+    short_count = signals_log.count("SHORT")
+    wait_count = signals_log.count("WAIT")
 
     return f"""
-📊 LEVEL 23.6 SMART FILTER ENGINE
+📊 LEVEL 23.7 PRO ANALYTICS DASHBOARD
 
 🚀 SOL/USDT
 
-📡 Market Regime: {regime}
-
-📈 Trades: {len(trades)}
+📈 EQUITY: {eq:.2f}
 
 🟢 WinRate: {winrate:.2f}
-💰 Expectancy: {expectancy:.3f}
+📉 Max Drawdown: {max_dd:.2f}
 
-💹 Equity: {equity[-1]:.2f}
+⚡ Performance Score: {perf:.2f}/100
 
-🧠 Last Score: {score}
+📊 Signals:
+• LONG: {long_count}
+• SHORT: {short_count}
+• WAIT: {wait_count}
 
-⚡ ANTI-CHOP ACTIVE
+🧠 Last Signal: {signal}
+📍 Price: {price:.2f}
+
+📡 ANALYTICS ENGINE ACTIVE
 """
 
 # ================= TELEGRAM =================
@@ -147,11 +155,11 @@ async def send(msg):
 async def run():
 
     await send("""
-🚀 LEVEL 23.6 STARTED
+🚀 LEVEL 23.7 STARTED
 
-🧠 SMART FILTER ENGINE ACTIVE
-🚫 CHOP MARKET BLOCKED
-📡 SOL/USDT
+🧠 PRO ANALYTICS ENGINE ACTIVE
+📊 WINRATE + DRAWDOWN TRACKING
+⚡ SOL/USDT
 """)
 
     last_report = time.time()
@@ -164,19 +172,27 @@ async def run():
 
             df = get_data()
 
-            signal, score, price, regime = strategy(df)
+            signal, score, price = strategy(df)
 
-            pnl = simulate(signal)
+            signals_log.append(signal)
+
+            result, sig = simulate_trade(signal)
 
             if signal != "WAIT":
-                trades.append(pnl)
-                balance += pnl
+                trades.append(result)
+
+                balance += result * 5
                 equity.append(balance)
 
-            log.info(f"{signal} | {score} | {regime} | {price} | Equity:{balance:.2f}")
+            log.info(f"{signal} | {score} | {price} | Equity:{balance:.2f}")
 
             if time.time() - last_report > REPORT_INTERVAL:
-                await send(dashboard(score, regime))
+
+                winrate, dd, eq = metrics()
+                perf = performance_score(winrate, dd)
+
+                await send(dashboard(perf, signal, price))
+
                 last_report = time.time()
 
         except Exception as e:
