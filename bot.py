@@ -5,7 +5,6 @@ import numpy as np
 import logging
 import time
 from dataclasses import dataclass
-from typing import Optional
 from telegram import Bot
 from dotenv import load_dotenv
 import os
@@ -28,190 +27,116 @@ exchange = ccxt.binance({
 })
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-log = logging.getLogger("LEVEL25")
+log = logging.getLogger("LEVEL26")
 
-# ================= SAFE CAST =================
-def f(x):
+# ================= SAFE VALUE =================
+def v(x):
     try:
         if isinstance(x, pd.Series):
-            x = x.iloc[-1]
-        if isinstance(x, np.ndarray):
-            x = x.item()
+            return float(x.iloc[-1])
         return float(x)
     except:
         return 0.0
 
-# ================= STATE =================
-@dataclass
-class Position:
-    symbol: str
-    entry: float
-    size: float
-    side: str
-    sl: float
-    tp: float
-
-class Portfolio:
-    def __init__(self):
-        self.balance = 1000.0
-        self.positions = {}
-        self.trades = []
-        self.equity = [1000.0]
-
-portfolio = Portfolio()
-
 # ================= DATA =================
 def get_data(symbol):
-    try:
-        ohlcv = exchange.fetch_ohlcv(symbol, "1m", limit=200)
-        df = pd.DataFrame(ohlcv, columns=["t","o","h","l","c","v"])
-        df = df.apply(pd.to_numeric, errors="coerce").dropna()
-        return df
-    except:
-        return pd.DataFrame()
+    df = exchange.fetch_ohlcv(symbol, "1m", limit=200)
+    df = pd.DataFrame(df, columns=["t","o","h","l","c","v"])
+    df = df.apply(pd.to_numeric, errors="coerce").dropna()
+    return df
 
-# ================= ATR =================
-def atr(df):
-    if df.empty or len(df) < 20:
-        return 0.0
+# ================= INDICATORS =================
+def indicators(df):
+    close = df["c"]
 
-    h = df["h"]
-    l = df["l"]
-    c = df["c"]
+    ema9 = close.ewm(span=9).mean().iloc[-1]
+    ema21 = close.ewm(span=21).mean().iloc[-1]
+    ema50 = close.ewm(span=50).mean().iloc[-1]
 
-    tr = pd.concat([
-        h - l,
-        (h - c.shift()).abs(),
-        (l - c.shift()).abs()
-    ], axis=1).max(axis=1)
+    rsi = compute_rsi(close, 14)
+    vol = close.pct_change().tail(30).std()
 
-    val = tr.rolling(14).mean().iloc[-1]
-    return f(val if not np.isnan(val) else df["c"].iloc[-1] * 0.01)
+    return ema9, ema21, ema50, rsi, vol
 
-# ================= REGIME DETECTION (NEW CORE) =================
-def market_regime(df):
-    ema_fast = df["c"].ewm(10).mean().iloc[-1]
-    ema_slow = df["c"].ewm(30).mean().iloc[-1]
-    volatility = df["c"].pct_change().tail(30).std()
+def compute_rsi(series, period=14):
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(period).mean()
+    rs = gain / (loss + 1e-9)
+    return 100 - (100 / (1 + rs)).iloc[-1]
 
-    if abs(ema_fast - ema_slow) / ema_slow > 0.002:
-        if volatility < 0.004:
-            return "TREND"
-        else:
-            return "VOLATILE_TREND"
-    return "CHOP"
+# ================= MARKET REGIME =================
+def regime(df):
+    vol = df["c"].pct_change().tail(50).std()
+    trend = abs(df["c"].ewm(20).mean().iloc[-1] - df["c"].ewm(50).mean().iloc[-1])
 
-# ================= STRATEGY =================
-def strategy(df):
-    if df.empty:
-        return "WAIT", 0.0, 0.0
+    if vol < 0.002:
+        return "SLOW"
+    if vol > 0.01:
+        return "CHAOS"
+    if trend > 0:
+        return "TREND"
+    return "RANGE"
 
-    price = f(df["c"].iloc[-1])
-
-    ema9 = f(df["c"].ewm(9).mean().iloc[-1])
-    ema21 = f(df["c"].ewm(21).mean().iloc[-1])
-
-    vol = f(df["c"].pct_change().tail(30).std())
-
-    regime = market_regime(df)
+# ================= SIGNAL ENGINE =================
+def signal_engine(df):
+    price = v(df["c"].iloc[-1])
+    ema9, ema21, ema50, rsi, vol = indicators(df)
+    reg = regime(df)
 
     score = 50
     signal = "WAIT"
 
-    # trend logic
-    if ema9 > ema21:
-        score += 25
+    # 1. Trend structure
+    if ema9 > ema21 > ema50:
+        score += 35
         signal = "LONG"
-    else:
-        score -= 25
+    elif ema9 < ema21 < ema50:
+        score += 35
         signal = "SHORT"
-
-    # regime filter (IMPORTANT)
-    if regime == "CHOP":
-        score -= 25
-    elif regime == "VOLATILE_TREND":
-        score -= 10
-
-    # volatility filter
-    if vol < 0.0015:
-        score += 10
-    elif vol > 0.005:
+    else:
         score -= 20
 
-    # final gate
-    if score < 70:
+    # 2. RSI filter (important)
+    if rsi > 70:
+        score -= 20
+    if rsi < 30:
+        score += 10
+
+    # 3. Market regime filter (VERY IMPORTANT)
+    if reg in ["CHAOS", "SLOW"]:
+        score -= 30
+
+    # 4. volatility sanity
+    if vol > 0.01:
+        score -= 25
+
+    # FINAL DECISION GATE (critical)
+    if score < 75:
         signal = "WAIT"
 
-    return signal, f(score), price, regime
+    confidence = min(100, max(0, score))
 
-# ================= POSITION =================
-def open_position(symbol, signal, price, atr_val):
-    if symbol in portfolio.positions or atr_val <= 0:
-        return
+    return signal, confidence, price, reg
 
-    size = max(5.0, (0.01 * portfolio.balance) / atr_val)
-
-    sl = price - atr_val * 2 if signal == "LONG" else price + atr_val * 2
-    tp = price + atr_val * 3 if signal == "LONG" else price - atr_val * 3
-
-    portfolio.positions[symbol] = Position(symbol, price, size, signal, sl, tp)
-
-    log.info(f"OPEN {symbol} {signal} @ {price:.2f}")
-
-def close_position(symbol, price, reason):
-    pos = portfolio.positions[symbol]
-
-    pnl = (price - pos.entry) * pos.size if pos.side == "LONG" else (pos.entry - price) * pos.size
-    pnl -= abs(pnl) * 0.002
-
-    portfolio.balance += pnl
-    portfolio.trades.append(pnl)
-    portfolio.equity.append(portfolio.balance)
-
-    del portfolio.positions[symbol]
-
-    log.info(f"CLOSE {symbol} {reason} PnL:{pnl:.2f}")
-
-def manage(df, symbol):
-    if symbol not in portfolio.positions or df.empty:
-        return
-
-    price = f(df["c"].iloc[-1])
-    pos = portfolio.positions[symbol]
-
-    if (pos.side == "LONG" and price <= pos.sl) or (pos.side == "SHORT" and price >= pos.sl):
-        close_position(symbol, price, "SL")
-    elif (pos.side == "LONG" and price >= pos.tp) or (pos.side == "SHORT" and price <= pos.tp):
-        close_position(symbol, price, "TP")
-
-# ================= METRICS =================
-def metrics():
-    if not portfolio.trades:
-        return 0.0, 0.0, portfolio.balance
-
-    win = len([x for x in portfolio.trades if x > 0])
-    wr = win / len(portfolio.trades)
-
-    eq = np.array(portfolio.equity)
-    dd = np.max(np.maximum.accumulate(eq) - eq)
-
-    return wr, dd, portfolio.balance
+# ================= LOG =================
+def log_line(symbol, signal, conf, price, reg):
+    log.info(f"{symbol} | {signal} | {conf:.1f} | {price:.2f} | {reg}")
 
 # ================= DASHBOARD =================
-def dashboard():
-    wr, dd, bal = metrics()
+def dashboard(results):
+    txt = "🚀 LEVEL 26 PROFESSIONAL SIGNAL ENGINE\n\n"
 
-    return f"""
-🚀 LEVEL 25 SMART REGIME ENGINE
-
-💰 Balance: {bal:.2f}
-🟢 WinRate: {wr:.1%}
-📉 Drawdown: {dd:.2f}
-
-📊 Positions: {len(portfolio.positions)}
-
-🧠 STATUS: REGIME-AWARE AI ACTIVE
+    for r in results:
+        txt += f"""
+📊 {r['symbol']}
+➡ Signal: {r['signal']}
+🧠 Confidence: {r['conf']:.1f}
+📍 Price: {r['price']:.2f}
+📡 Regime: {r['reg']}
+-------------------------
 """
+    return txt
 
 # ================= TELEGRAM =================
 async def send(msg):
@@ -222,27 +147,34 @@ async def send(msg):
 
 # ================= LOOP =================
 async def run():
-    await send("🚀 LEVEL 25 STARTED")
+    await send("🚀 LEVEL 26 STARTED\nPRO TRADING ENGINE ACTIVE")
 
     last_report = time.time()
 
     while True:
         try:
-            for symbol in SYMBOLS:
+            results = []
 
-                df = get_data(symbol)
-                signal, score, price, regime = strategy(df)
-                atr_val = atr(df)
+            for s in SYMBOLS:
+                df = get_data(s)
 
-                manage(df, symbol)
+                signal, conf, price, reg = signal_engine(df)
 
-                if signal != "WAIT":
-                    open_position(symbol, signal, price, atr_val)
+                log_line(s, signal, conf, price, reg)
 
-                log.info(f"{symbol} | {signal} | {score} | {price:.2f} | {regime} | BAL:{portfolio.balance:.2f}")
+                results.append({
+                    "symbol": s,
+                    "signal": signal,
+                    "conf": conf,
+                    "price": price,
+                    "reg": reg
+                })
 
-            if time.time() - last_report > REPORT_INTERVAL:
-                await send(dashboard())
+            # فقط اگر سیگنال قوی بود گزارش بده
+            strong = [r for r in results if r["conf"] >= 80]
+
+            if time.time() - last_report > REPORT_INTERVAL and strong:
+                await send(dashboard(strong))
                 last_report = time.time()
 
         except Exception as e:
