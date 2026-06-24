@@ -4,10 +4,10 @@ import pandas as pd
 import numpy as np
 import logging
 import time
+import os
 from dataclasses import dataclass
 from telegram import Bot
 from dotenv import load_dotenv
-import os
 
 load_dotenv()
 
@@ -18,6 +18,7 @@ CHAT_ID = os.getenv("CHAT_ID")
 SYMBOLS = ["SOL/USDT", "BTC/USDT", "ETH/USDT"]
 INTERVAL = 30
 REPORT_INTERVAL = 600
+HEARTBEAT_INTERVAL = 120
 
 bot = Bot(token=TOKEN)
 
@@ -27,33 +28,24 @@ exchange = ccxt.binance({
 })
 
 logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("V4.2")
+log = logging.getLogger("V4.2_FIXED")
 
 # ================= STATE =================
-@dataclass
-class SignalTrade:
-    symbol: str
-    signal: str
-    entry: float
-    result: str = "OPEN"  # WIN / LOSS / OPEN
-
 class Portfolio:
     def __init__(self):
         self.balance = 1000.0
-        self.signals = []
-        self.trades = []
-        self.equity = [1000.0]
+        self.signals = []   # (symbol, signal, entry, result)
         self.last_signal = {}
         self.last_heartbeat = time.time()
 
 portfolio = Portfolio()
 
-# ================= TELEGRAM =================
-def send(msg):
+# ================= TELEGRAM (FIXED ASYNC) =================
+async def send(msg: str):
     try:
-        bot.send_message(chat_id=CHAT_ID, text=msg)
+        await bot.send_message(chat_id=CHAT_ID, text=msg)
     except Exception as e:
-        log.error(e)
+        log.error(f"Telegram error: {e}")
 
 # ================= DATA =================
 def get_data(symbol):
@@ -64,11 +56,10 @@ def get_data(symbol):
 
 # ================= STRATEGY =================
 def strategy(df):
-    price = df["c"].iloc[-1]
+    price = float(df["c"].iloc[-1])
 
     ema9 = df["c"].ewm(span=9).mean().iloc[-1]
     ema21 = df["c"].ewm(span=21).mean().iloc[-1]
-
     vol = df["c"].pct_change().tail(30).std()
 
     score = 50
@@ -90,86 +81,82 @@ def strategy(df):
 
     return signal, score, price
 
-# ================= TRACK SIGNALS =================
-def register_signal(symbol, signal, price):
-    portfolio.signals.append(SignalTrade(symbol, signal, price))
+# ================= SIGNAL TRACKING =================
+def register(symbol, signal, price):
+    portfolio.signals.append({
+        "symbol": symbol,
+        "signal": signal,
+        "entry": price,
+        "result": "OPEN"
+    })
 
-def evaluate_signals(current_price):
-    """
-    بررسی اینکه سیگنال‌ها درست بودن یا نه
-    """
-    for s in portfolio.signals:
-        if s.result != "OPEN":
-            continue
-
-        if s.signal == "WAIT":
-            s.result = "SKIP"
-            continue
-
-        change = (current_price - s.entry) / s.entry
-
-        if s.signal == "LONG":
-            if change > 0:
-                s.result = "WIN"
-            elif change < -0.003:
-                s.result = "LOSS"
-
-        if s.signal == "SHORT":
-            if change < 0:
-                s.result = "WIN"
-            elif change > 0.003:
-                s.result = "LOSS"
-
-# ================= STATS =================
 def stats():
-    wins = len([s for s in portfolio.signals if s.result == "WIN"])
-    losses = len([s for s in portfolio.signals if s.result == "LOSS"])
+    wins = len([s for s in portfolio.signals if s["result"] == "WIN"])
+    losses = len([s for s in portfolio.signals if s["result"] == "LOSS"])
     total = wins + losses
+    acc = wins / total if total > 0 else 0
+    return wins, losses, acc
 
-    accuracy = wins / total if total > 0 else 0
+def evaluate(current_price):
+    for s in portfolio.signals:
+        if s["result"] != "OPEN":
+            continue
 
-    return wins, losses, accuracy
+        change = (current_price - s["entry"]) / s["entry"]
+
+        if s["signal"] == "LONG":
+            if change > 0.002:
+                s["result"] = "WIN"
+            elif change < -0.002:
+                s["result"] = "LOSS"
+
+        if s["signal"] == "SHORT":
+            if change < -0.002:
+                s["result"] = "WIN"
+            elif change > 0.002:
+                s["result"] = "LOSS"
 
 # ================= DASHBOARD =================
 def dashboard(signal, price, score):
     wins, losses, acc = stats()
 
     return f"""
-🚀 V4.2 SIGNAL PERFORMANCE DASHBOARD
+🚀 V4.2 FIXED DASHBOARD
 
 💰 Balance: {portfolio.balance:.2f}
 
-📊 Signal Stats:
+📊 SIGNAL PERFORMANCE
 ✔️ Wins: {wins}
 ❌ Losses: {losses}
 📈 Accuracy: {acc:.2%}
-📦 Total Tracked: {wins + losses}
+📦 Total: {wins + losses}
 
-🧠 Current Signal: {signal}
+🧠 Signal: {signal}
 ⚡ Score: {score}
 📍 Price: {price:.2f}
 """
 
 # ================= HEARTBEAT =================
-def heartbeat():
+async def heartbeat():
     wins, losses, acc = stats()
 
-    send(f"""
-🟢 V4.2 HEARTBEAT
+    await send(f"""
+🟢 HEARTBEAT - BOT LIVE
 
-System: ACTIVE
+Status: ACTIVE
 Accuracy: {acc:.2%}
 Wins: {wins} | Losses: {losses}
-Signals tracked: {len(portfolio.signals)}
+Signals: {len(portfolio.signals)}
 
-Bot is LIVE ✔️
+System OK ✔️
 """)
 
-# ================= LOOP =================
+# ================= MAIN LOOP =================
 async def run():
-    send("🚀 V4.2 STARTED")
+    await send("🚀 V4.2 FIXED STARTED")
 
     last_report = time.time()
+    last_hb = time.time()
 
     while True:
         try:
@@ -178,23 +165,31 @@ async def run():
                 df = get_data(s)
                 signal, score, price = strategy(df)
 
-                register_signal(s, signal, price)
-                evaluate_signals(price)
+                # register only meaningful signals
+                if signal != "WAIT":
+                    register(s, signal, price)
+
+                evaluate(price)
+
+                portfolio.last_signal[s] = signal
 
                 log.info(f"{s} | {signal} | {score} | {price}")
 
+            # 📊 REPORT
             if time.time() - last_report > REPORT_INTERVAL:
-                send(dashboard(signal, price, score))
+                await send(dashboard(signal, price, score))
                 last_report = time.time()
 
-            if time.time() - portfolio.last_heartbeat > 120:
-                heartbeat()
-                portfolio.last_heartbeat = time.time()
+            # 🟢 HEARTBEAT FIXED
+            if time.time() - last_hb > HEARTBEAT_INTERVAL:
+                await heartbeat()
+                last_hb = time.time()
 
         except Exception as e:
-            log.error(e)
+            log.error(f"Loop error: {e}")
 
         await asyncio.sleep(INTERVAL)
 
+# ================= START =================
 if __name__ == "__main__":
     asyncio.run(run())
