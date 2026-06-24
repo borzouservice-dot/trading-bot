@@ -6,8 +6,8 @@ import logging
 import time
 import os
 from dataclasses import dataclass
-from dotenv import load_dotenv
 from telegram import Bot
+from dotenv import load_dotenv
 
 load_dotenv()
 
@@ -16,10 +16,7 @@ TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 SYMBOLS = ["SOL/USDT", "BTC/USDT", "ETH/USDT"]
-
-TIMEFRAMES = ["1m", "5m", "15m"]
 INTERVAL = 30
-REPORT_INTERVAL = 600
 
 bot = Bot(token=TOKEN)
 
@@ -28,8 +25,8 @@ exchange = ccxt.binance({
     "options": {"defaultType": "spot"}
 })
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s")
-log = logging.getLogger("V3_INST")
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("V4_HEDGE")
 
 # ================= STATE =================
 @dataclass
@@ -51,190 +48,154 @@ class Portfolio:
 portfolio = Portfolio()
 
 # ================= DATA =================
-def get_data(symbol, tf):
-    df = exchange.fetch_ohlcv(symbol, tf, limit=200)
+def get_data(symbol):
+    df = exchange.fetch_ohlcv(symbol, "1m", limit=200)
     df = pd.DataFrame(df, columns=["t","o","h","l","c","v"])
-    df[["o","h","l","c"]] = df[["o","h","l","c"]].astype(float)
+    df[["o","h","l","c","v"]] = df[["o","h","l","c","v"]].astype(float)
     return df
 
-# ================= INDICATORS =================
-def atr(df):
-    h, l, c = df["h"], df["l"], df["c"]
+# ================= LAYER 1: TREND =================
+def trend_score(df):
+    ema50 = df["c"].ewm(50).mean().iloc[-1]
+    ema200 = df["c"].ewm(200).mean().iloc[-1]
 
-    tr = pd.concat([
-        h - l,
-        (h - c.shift()).abs(),
-        (l - c.shift()).abs()
-    ], axis=1).max(axis=1)
+    if ema50 > ema200:
+        return 1
+    elif ema50 < ema200:
+        return -1
+    return 0
 
-    return tr.rolling(14).mean().iloc[-1]
+# ================= LAYER 2: MOMENTUM =================
+def momentum_score(df):
+    rsi = 100 - (100 / (1 + df["c"].pct_change().rolling(14).mean()))
+    rsi_val = rsi.iloc[-1]
 
-def trend(df):
-    ema_fast = df["c"].ewm(9).mean().iloc[-1]
-    ema_slow = df["c"].ewm(21).mean().iloc[-1]
+    roc = df["c"].pct_change(5).iloc[-1]
 
-    if ema_fast > ema_slow:
-        return "BULL"
-    elif ema_fast < ema_slow:
-        return "BEAR"
-    return "SIDE"
+    score = 0
 
-def momentum(df):
-    r = df["c"].pct_change().tail(10).sum()
-    return r
+    if rsi_val > 55:
+        score += 1
+    elif rsi_val < 45:
+        score -= 1
 
-def volume_ok(df):
-    return df["v"].iloc[-1] > df["v"].rolling(20).mean().iloc[-1]
+    if roc > 0:
+        score += 1
+    else:
+        score -= 1
 
-# ================= LIQUIDITY FILTER =================
-def liquidity_sweep(df):
-    high = df["h"].iloc[-10:].max()
-    low = df["l"].iloc[-10:].min()
+    return score
+
+# ================= LAYER 3: LIQUIDITY =================
+def liquidity_score(df):
+    high = df["h"].rolling(20).max().iloc[-1]
+    low = df["l"].rolling(20).min().iloc[-1]
     price = df["c"].iloc[-1]
 
-    # fake breakout detection
     if price > high * 1.002:
-        return "FAKE_UP"
+        return -1
     if price < low * 0.998:
-        return "FAKE_DOWN"
-    return "CLEAN"
+        return -1
 
-# ================= MULTI TF SCORE =================
-def multi_tf_score(symbol):
-    signals = []
+    return 1
 
-    for tf in TIMEFRAMES:
-        df = get_data(symbol, tf)
+# ================= LAYER 4: VOLUME =================
+def volume_score(df):
+    v = df["v"]
+    if v.iloc[-1] > v.rolling(20).mean().iloc[-1]:
+        return 1
+    return 0
 
-        t = trend(df)
-        m = momentum(df)
-        v = volume_ok(df)
-        liq = liquidity_sweep(df)
+# ================= FINAL SCORE =================
+def final_score(df):
+    t = trend_score(df)
+    m = momentum_score(df)
+    l = liquidity_score(df)
+    v = volume_score(df)
 
-        score = 50
-
-        if t == "BULL":
-            score += 25
-        elif t == "BEAR":
-            score -= 25
-
-        if m > 0:
-            score += 10
-        else:
-            score -= 10
-
-        if v:
-            score += 10
-        else:
-            score -= 10
-
-        if liq != "CLEAN":
-            score -= 20
-
-        signals.append(score)
-
-    return np.mean(signals)
+    score = (t * 35) + (m * 25) + (l * 25) + (v * 15)
+    return score
 
 # ================= STRATEGY =================
 def strategy(symbol):
-    df = get_data(symbol, "1m")
-
+    df = get_data(symbol)
     price = df["c"].iloc[-1]
-    score = multi_tf_score(symbol)
 
-    if score > 70:
+    score = final_score(df)
+
+    if score > 50:
         signal = "LONG"
-    elif score < 30:
+    elif score < -50:
         signal = "SHORT"
     else:
         signal = "WAIT"
 
     return signal, score, price
 
+# ================= RISK =================
+def position_size(balance, price):
+    risk = balance * 0.01
+    return risk / price
+
 # ================= EXECUTION =================
-def open_position(symbol, signal, price):
+def execute(symbol, signal, price):
     if symbol in portfolio.positions:
         return
 
-    atr_val = atr(get_data(symbol, "1m"))
-    size = (portfolio.balance * 0.01) / (atr_val * 2)
+    if signal == "WAIT":
+        return
 
-    sl = price - atr_val * 2 if signal == "LONG" else price + atr_val * 2
-    tp = price + atr_val * 3 if signal == "LONG" else price - atr_val * 3
+    size = position_size(portfolio.balance, price)
+
+    if signal == "LONG":
+        sl = price * 0.99
+        tp = price * 1.03
+    else:
+        sl = price * 1.01
+        tp = price * 0.97
 
     portfolio.positions[symbol] = Position(symbol, price, size, signal, sl, tp)
 
-    log.info(f"OPEN {symbol} {signal} @ {price:.2f}")
+    log.info(f"OPEN {symbol} {signal} @ {price:.2f} | SCORE")
 
-def close_position(symbol, price):
-    pos = portfolio.positions[symbol]
-
-    pnl = (price - pos.entry) * pos.size if pos.side == "LONG" else (pos.entry - price) * pos.size
-
-    portfolio.balance += pnl
-    portfolio.trades.append(pnl)
-    portfolio.equity.append(portfolio.balance)
-
-    del portfolio.positions[symbol]
-
-    log.info(f"CLOSE {symbol} PnL:{pnl:.2f}")
-
-def manage(symbol, df):
+# ================= MANAGE =================
+def manage(symbol, price):
     if symbol not in portfolio.positions:
         return
 
     pos = portfolio.positions[symbol]
-    price = df["c"].iloc[-1]
 
-    if (pos.side == "LONG" and price <= pos.sl) or (pos.side == "SHORT" and price >= pos.sl):
-        close_position(symbol, price)
+    if pos.side == "LONG":
+        pnl = (price - pos.entry) * pos.size
+        if price <= pos.sl or price >= pos.tp:
+            close(symbol, price, pnl)
+    else:
+        pnl = (pos.entry - price) * pos.size
+        if price >= pos.sl or price <= pos.tp:
+            close(symbol, price, pnl)
 
-    if (pos.side == "LONG" and price >= pos.tp) or (pos.side == "SHORT" and price <= pos.tp):
-        close_position(symbol, price)
+def close(symbol, price, pnl):
+    portfolio.balance += pnl
+    portfolio.trades.append(pnl)
+    portfolio.equity.append(portfolio.balance)
+    del portfolio.positions[symbol]
 
-# ================= DASHBOARD =================
-def dashboard():
-    winrate = len([t for t in portfolio.trades if t > 0]) / max(1, len(portfolio.trades))
-
-    return f"""
-🚀 V3 INSTITUTIONAL ENGINE
-
-💰 Balance: {portfolio.balance:.2f}
-📊 WinRate: {winrate:.1%}
-📦 Positions: {len(portfolio.positions)}
-📈 Trades: {len(portfolio.trades)}
-"""
-
-# ================= TELEGRAM =================
-async def send(msg):
-    try:
-        await bot.send_message(chat_id=CHAT_ID, text=msg)
-    except:
-        pass
+    log.info(f"CLOSE {symbol} PnL:{pnl:.2f}")
 
 # ================= LOOP =================
 async def run():
-    await send("🚀 V3 INSTITUTIONAL STARTED")
+    log.info("🚀 V4 HEDGE FUND STARTED")
 
     while True:
-        try:
-            for symbol in SYMBOLS:
+        for s in SYMBOLS:
+            signal, score, price = strategy(s)
 
-                signal, score, price = strategy(symbol)
+            manage(s, price)
+            execute(s, signal, price)
 
-                df = get_data(symbol, "1m")
-                manage(symbol, df)
+            log.info(f"{s} | {signal} | {score:.1f} | {price:.2f}")
 
-                if signal != "WAIT":
-                    open_position(symbol, signal, price)
-
-                log.info(f"{symbol} | {signal} | {score:.1f} | {price:.2f}")
-
-            await asyncio.sleep(INTERVAL)
-
-        except Exception as e:
-            log.error(e)
-            await asyncio.sleep(5)
+        await asyncio.sleep(INTERVAL)
 
 if __name__ == "__main__":
     asyncio.run(run())
