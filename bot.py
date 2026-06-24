@@ -28,14 +28,14 @@ exchange = ccxt.binance({
 })
 
 logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("V5_1")
+log = logging.getLogger("V5_2")
 
 # ================= STATE =================
 class Fund:
     def __init__(self):
         self.balance = 1000.0
         self.equity = [1000.0]
-        self.trades = []       # 1 win / -1 loss
+        self.trades = []
         self.signals = []
         self.last_signal = {}
         self.last_hb = time.time()
@@ -56,51 +56,26 @@ def get_data(symbol):
     df["c"] = df["c"].astype(float)
     return df
 
-# ================= MARKET REGIME =================
+# ================= REGIME (IMPROVED) =================
 def market_regime(df):
 
     ema20 = df["c"].ewm(span=20, adjust=False).mean().iloc[-1]
     ema50 = df["c"].ewm(span=50, adjust=False).mean().iloc[-1]
+    ema200 = df["c"].ewm(span=200, adjust=False).mean().iloc[-1]
 
-    distance = abs(ema20 - ema50) / ema50
+    trend_strength = abs(ema20 - ema50) / ema50
 
-    if distance < 0.0008:
+    if trend_strength < 0.001:
         return "CHOP"
 
-    if ema20 > ema50:
-        return "TREND_UP"
+    # institutional bias filter
+    if ema20 > ema50 and ema50 > ema200:
+        return "STRONG_UP"
 
-    return "TREND_DOWN"
+    if ema20 < ema50 and ema50 < ema200:
+        return "STRONG_DOWN"
 
-# ================= SIGNAL ENGINE =================
-def signal_engine(df):
-
-    price = df["c"].iloc[-1]
-
-    ema9 = df["c"].ewm(span=9).mean().iloc[-1]
-    ema21 = df["c"].ewm(span=21).mean().iloc[-1]
-
-    rsi = compute_rsi(df["c"])
-
-    score = 50
-    signal = "WAIT"
-
-    if ema9 > ema21:
-        score += 30
-        signal = "LONG"
-    else:
-        score -= 30
-        signal = "SHORT"
-
-    if rsi > 70:
-        score -= 15
-    elif rsi < 30:
-        score += 15
-
-    if score < 68:
-        signal = "WAIT"
-
-    return signal, score, price
+    return "WEAK"
 
 # ================= RSI =================
 def compute_rsi(series, period=14):
@@ -109,6 +84,50 @@ def compute_rsi(series, period=14):
     loss = (-delta.where(delta < 0, 0)).rolling(period).mean()
     rs = gain / loss
     return 100 - (100 / (1 + rs)).iloc[-1]
+
+# ================= SIGNAL ENGINE (FIXED LOGIC) =================
+def signal_engine(df, regime):
+
+    price = df["c"].iloc[-1]
+
+    ema9 = df["c"].ewm(span=9).mean().iloc[-1]
+    ema21 = df["c"].ewm(span=21).mean().iloc[-1]
+    rsi = compute_rsi(df["c"])
+
+    score = 50
+    signal = "WAIT"
+
+    # TREND ALIGNMENT RULE (IMPORTANT FIX)
+    if regime == "STRONG_UP":
+        if ema9 > ema21:
+            score += 40
+            signal = "LONG"
+
+    elif regime == "STRONG_DOWN":
+        if ema9 < ema21:
+            score += 40
+            signal = "SHORT"
+
+    else:
+        return "WAIT", 0, price
+
+    # RSI confirmation
+    if signal == "LONG":
+        if rsi > 70:
+            score -= 20
+        elif rsi < 35:
+            score += 10
+
+    if signal == "SHORT":
+        if rsi < 30:
+            score -= 20
+        elif rsi > 65:
+            score += 10
+
+    if score < 75:
+        signal = "WAIT"
+
+    return signal, score, price
 
 # ================= TRACKING =================
 def register(symbol, signal, price):
@@ -132,26 +151,26 @@ def evaluate(symbol, price):
         change = (price - s["entry"]) / s["entry"]
 
         if s["signal"] == "LONG":
-            if change > 0.003:
+            if change > 0.004:
                 s["result"] = "WIN"
                 fund.trades.append(1)
                 fund.balance += 10
                 fund.equity.append(fund.balance)
 
-            elif change < -0.003:
+            elif change < -0.004:
                 s["result"] = "LOSS"
                 fund.trades.append(-1)
                 fund.balance -= 10
                 fund.equity.append(fund.balance)
 
         if s["signal"] == "SHORT":
-            if change < -0.003:
+            if change < -0.004:
                 s["result"] = "WIN"
                 fund.trades.append(1)
                 fund.balance += 10
                 fund.equity.append(fund.balance)
 
-            elif change > 0.003:
+            elif change > 0.004:
                 s["result"] = "LOSS"
                 fund.trades.append(-1)
                 fund.balance -= 10
@@ -176,7 +195,7 @@ def dashboard():
     w, l, acc, dd = metrics()
 
     return f"""
-🚀 V5.1 UNIFIED QUANT
+🚀 V5.2 INSTITUTIONAL FIX
 
 💰 Balance: {fund.balance:.2f}
 
@@ -185,7 +204,7 @@ def dashboard():
 📊 Accuracy: {acc:.2%}
 📉 Drawdown: {dd:.2f}
 
-🧬 System: ACTIVE ✔️
+🧠 Status: INSTITUTIONAL MODE ACTIVE
 """
 
 # ================= HEARTBEAT =================
@@ -193,20 +212,20 @@ async def heartbeat():
     w, l, acc, dd = metrics()
 
     await send(f"""
-🟢 HEARTBEAT
+🟢 HEARTBEAT V5.2
 
 Balance: {fund.balance:.2f}
 Accuracy: {acc:.2%}
 Wins: {w} | Losses: {l}
 DD: {dd:.2f}
 
-System OK ✔️
+SYSTEM OK ✔️
 """)
 
 # ================= MAIN LOOP =================
 async def run():
 
-    await send("🚀 V5.1 UNIFIED QUANT STARTED")
+    await send("🚀 V5.2 INSTITUTIONAL FIX STARTED")
     await send("🟢 SYSTEM ONLINE")
 
     last_report = time.time()
@@ -219,17 +238,10 @@ async def run():
             for sym in SYMBOLS:
 
                 df = get_data(sym)
-
                 regime = market_regime(df)
 
-                signal, score, price = signal_engine(df)
+                signal, score, price = signal_engine(df, regime)
 
-                # CHOP FILTER
-                if regime == "CHOP":
-                    log.info(f"{sym} | CHOP MARKET SKIP")
-                    continue
-
-                # SIGNAL CHANGE ONLY
                 if signal != "WAIT":
 
                     if signal != fund.last_signal.get(sym):
@@ -237,13 +249,13 @@ async def run():
                         register(sym, signal, price)
 
                         await send(f"""
-🚨 NEW SIGNAL
+🚨 INSTITUTIONAL SIGNAL
 
 {sym}
 Signal: {signal}
 Score: {score}
-Price: {price:.2f}
 Regime: {regime}
+Price: {price:.2f}
 """)
 
                         fund.last_signal[sym] = signal
