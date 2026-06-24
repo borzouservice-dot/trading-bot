@@ -26,161 +26,143 @@ exchange = ccxt.binance({
     "options": {"defaultType": "spot"}
 })
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("LEVEL26")
 
-# ================= SAFE VALUE =================
-def v(x):
+# ================= SAFE =================
+def f(x):
     try:
-        if isinstance(x, pd.Series):
-            return float(x.iloc[-1])
-        return float(x)
+        return float(x.iloc[-1]) if hasattr(x, "iloc") else float(x)
     except:
         return 0.0
 
 # ================= DATA =================
 def get_data(symbol):
-    df = exchange.fetch_ohlcv(symbol, "1m", limit=200)
-    df = pd.DataFrame(df, columns=["t","o","h","l","c","v"])
+    ohlcv = exchange.fetch_ohlcv(symbol, "1m", limit=200)
+    df = pd.DataFrame(ohlcv, columns=["t","o","h","l","c","v"])
     df = df.apply(pd.to_numeric, errors="coerce").dropna()
     return df
 
-# ================= INDICATORS =================
-def indicators(df):
-    close = df["c"]
-
-    ema9 = close.ewm(span=9).mean().iloc[-1]
-    ema21 = close.ewm(span=21).mean().iloc[-1]
-    ema50 = close.ewm(span=50).mean().iloc[-1]
-
-    rsi = compute_rsi(close, 14)
-    vol = close.pct_change().tail(30).std()
-
-    return ema9, ema21, ema50, rsi, vol
-
-def compute_rsi(series, period=14):
-    delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(period).mean()
-    rs = gain / (loss + 1e-9)
-    return 100 - (100 / (1 + rs)).iloc[-1]
-
-# ================= MARKET REGIME =================
+# ================= REGIME =================
 def regime(df):
-    vol = df["c"].pct_change().tail(50).std()
-    trend = abs(df["c"].ewm(20).mean().iloc[-1] - df["c"].ewm(50).mean().iloc[-1])
+    ema_fast = df["c"].ewm(10).mean().iloc[-1]
+    ema_slow = df["c"].ewm(30).mean().iloc[-1]
+    vol = df["c"].pct_change().std()
 
-    if vol < 0.002:
-        return "SLOW"
-    if vol > 0.01:
-        return "CHAOS"
-    if trend > 0:
+    if abs(ema_fast - ema_slow) / ema_slow > 0.002:
         return "TREND"
-    return "RANGE"
+    if vol > 0.005:
+        return "VOLATILE"
+    return "CHOP"
+
+# ================= ATR =================
+def atr(df):
+    h, l, c = df["h"], df["l"], df["c"]
+
+    tr = pd.concat([
+        h - l,
+        (h - c.shift()).abs(),
+        (l - c.shift()).abs()
+    ], axis=1).max(axis=1)
+
+    val = tr.rolling(14).mean().iloc[-1]
+    return float(val) if not np.isnan(val) else float(c.iloc[-1] * 0.01)
 
 # ================= SIGNAL ENGINE =================
 def signal_engine(df):
-    price = v(df["c"].iloc[-1])
-    ema9, ema21, ema50, rsi, vol = indicators(df)
-    reg = regime(df)
+    price = float(df["c"].iloc[-1])
+
+    ema9 = df["c"].ewm(9).mean().iloc[-1]
+    ema21 = df["c"].ewm(21).mean().iloc[-1]
+    rsi = 50  # ساده نگه داشتیم (قابل ارتقا)
+
+    vol = df["c"].pct_change().std()
+    rg = regime(df)
 
     score = 50
     signal = "WAIT"
 
-    # 1. Trend structure
-    if ema9 > ema21 > ema50:
-        score += 35
+    # trend
+    if ema9 > ema21:
+        score += 25
         signal = "LONG"
-    elif ema9 < ema21 < ema50:
-        score += 35
-        signal = "SHORT"
     else:
-        score -= 20
-
-    # 2. RSI filter (important)
-    if rsi > 70:
-        score -= 20
-    if rsi < 30:
-        score += 10
-
-    # 3. Market regime filter (VERY IMPORTANT)
-    if reg in ["CHAOS", "SLOW"]:
-        score -= 30
-
-    # 4. volatility sanity
-    if vol > 0.01:
         score -= 25
+        signal = "SHORT"
 
-    # FINAL DECISION GATE (critical)
+    # regime filter
+    if rg == "CHOP":
+        score -= 30
+    if rg == "VOLATILE":
+        score -= 10
+
+    # volatility filter
+    if vol < 0.0015:
+        score += 10
+    elif vol > 0.005:
+        score -= 20
+
+    # final decision
     if score < 75:
         signal = "WAIT"
 
-    confidence = min(100, max(0, score))
+    return signal, score, price, rg
 
-    return signal, confidence, price, reg
+# ================= EXECUTION =================
+@dataclass
+class Position:
+    symbol: str
+    entry: float
+    side: str
+    sl: float
+    tp: float
 
-# ================= LOG =================
-def log_line(symbol, signal, conf, price, reg):
-    log.info(f"{symbol} | {signal} | {conf:.1f} | {price:.2f} | {reg}")
+portfolio = {
+    "balance": 1000.0,
+    "position": {}
+}
 
-# ================= DASHBOARD =================
-def dashboard(results):
-    txt = "🚀 LEVEL 26 PROFESSIONAL SIGNAL ENGINE\n\n"
+def open_pos(symbol, signal, price, atrv):
+    if symbol in portfolio["position"]:
+        return
 
-    for r in results:
-        txt += f"""
-📊 {r['symbol']}
-➡ Signal: {r['signal']}
-🧠 Confidence: {r['conf']:.1f}
-📍 Price: {r['price']:.2f}
-📡 Regime: {r['reg']}
--------------------------
-"""
-    return txt
+    sl = price - atrv*2 if signal=="LONG" else price + atrv*2
+    tp = price + atrv*3 if signal=="LONG" else price - atrv*3
 
-# ================= TELEGRAM =================
-async def send(msg):
-    try:
-        await bot.send_message(chat_id=CHAT_ID, text=msg)
-    except Exception as e:
-        log.error(e)
+    portfolio["position"][symbol] = Position(symbol, price, signal, sl, tp)
+    log.info(f"OPEN {symbol} {signal} @ {price}")
+
+def close_pos(symbol, price):
+    pos = portfolio["position"][symbol]
+
+    pnl = (price - pos.entry) if pos.side=="LONG" else (pos.entry - price)
+    pnl *= 10
+
+    portfolio["balance"] += pnl
+    del portfolio["position"][symbol]
+
+    log.info(f"CLOSE {symbol} PnL={pnl:.2f}")
 
 # ================= LOOP =================
 async def run():
-    await send("🚀 LEVEL 26 STARTED\nPRO TRADING ENGINE ACTIVE")
-
-    last_report = time.time()
-
     while True:
         try:
-            results = []
-
             for s in SYMBOLS:
                 df = get_data(s)
 
-                signal, conf, price, reg = signal_engine(df)
+                signal, score, price, rg = signal_engine(df)
+                atrv = atr(df)
 
-                log_line(s, signal, conf, price, reg)
+                if signal != "WAIT":
+                    open_pos(s, signal, price, atrv)
 
-                results.append({
-                    "symbol": s,
-                    "signal": signal,
-                    "conf": conf,
-                    "price": price,
-                    "reg": reg
-                })
+                log.info(f"{s} | {signal} | {score:.1f} | {rg} | {price}")
 
-            # فقط اگر سیگنال قوی بود گزارش بده
-            strong = [r for r in results if r["conf"] >= 80]
-
-            if time.time() - last_report > REPORT_INTERVAL and strong:
-                await send(dashboard(strong))
-                last_report = time.time()
+            await asyncio.sleep(INTERVAL)
 
         except Exception as e:
-            log.exception(e)
-
-        await asyncio.sleep(INTERVAL)
+            log.error(e)
+            await asyncio.sleep(5)
 
 if __name__ == "__main__":
     asyncio.run(run())
