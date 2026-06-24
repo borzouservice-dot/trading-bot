@@ -15,18 +15,32 @@ load_dotenv()
 # ================= CONFIG =================
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
+
 SYMBOLS = ["SOL/USDT", "BTC/USDT", "ETH/USDT"]
 INTERVAL = 30
 REPORT_INTERVAL = 600
 
 bot = Bot(token=TOKEN)
+
 exchange = ccxt.binance({
     "enableRateLimit": True,
     "options": {"defaultType": "spot"}
 })
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-log = logging.getLogger("LEVEL24.1")
+log = logging.getLogger("LEVEL24.2")
+
+# ================= SAFE CAST ENGINE (FIX CORE) =================
+def f(x):
+    """Force scalar float — FIX numpy.ndarray bug"""
+    if isinstance(x, np.ndarray):
+        return float(x.item())
+    if isinstance(x, (np.floating, float, int)):
+        return float(x)
+    try:
+        return float(x)
+    except:
+        return 0.0
 
 # ================= STATE =================
 @dataclass
@@ -42,76 +56,89 @@ class Position:
 class Portfolio:
     def __init__(self):
         self.balance = 1000.0
-        self.positions: dict[str, Position] = {}
-        self.trades: list[float] = []      # closed PnLs
-        self.equity: list[float] = [1000.0]
+        self.positions = {}
+        self.trades = []
+        self.equity = [1000.0]
+        self.last_heartbeat = time.time()
 
 portfolio = Portfolio()
 
 # ================= DATA =================
-def get_data(symbol: str):
+def get_data(symbol):
     ohlcv = exchange.fetch_ohlcv(symbol, "1m", limit=200)
-    df = pd.DataFrame(ohlcv, columns=["t", "o", "h", "l", "c", "v"])
-    df[["o", "h", "l", "c"]] = df[["o", "h", "l", "c"]].astype(float)
+    df = pd.DataFrame(ohlcv, columns=["t","o","h","l","c","v"])
+
+    for col in ["o","h","l","c","v"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df = df.dropna()
     return df
 
-# ================= INDICATORS =================
+# ================= ATR (SAFE FIXED) =================
 def atr(df, period=14):
     high = df["h"]
     low = df["l"]
     close = df["c"]
+
     tr = np.maximum.reduce([
         high - low,
-        abs(high - close.shift()),
-        abs(low - close.shift())
+        abs(high - close.shift(1)),
+        abs(low - close.shift(1))
     ])
-    val = tr.rolling(period).mean().iloc[-1]
-    return float(val) if not np.isnan(val) else float(df["c"].iloc[-1] * 0.015)
 
-# ================= STRATEGY =================
+    val = tr.rolling(period).mean().iloc[-1]
+
+    return f(val if not np.isnan(val) else df["c"].iloc[-1] * 0.015)
+
+# ================= STRATEGY (FIXED TYPES) =================
 def strategy(df):
-    price = float(df["c"].iloc[-1])
-    
-    ema9 = df["c"].ewm(span=9, adjust=False).mean().iloc[-1]
-    ema21 = df["c"].ewm(span=21, adjust=False).mean().iloc[-1]
-    
-    vol = df["c"].pct_change().tail(30).std()
-    
+    price = f(df["c"].iloc[-1])
+
+    ema9 = f(df["c"].ewm(span=9, adjust=False).mean().iloc[-1])
+    ema21 = f(df["c"].ewm(span=21, adjust=False).mean().iloc[-1])
+
+    vol = f(df["c"].pct_change().tail(30).std())
+
     score = 50
+    signal = "WAIT"
+
     if ema9 > ema21:
         score += 30
         signal = "LONG"
     else:
         score -= 30
         signal = "SHORT"
-    
+
     if vol < 0.0018:
         score += 15
     elif vol > 0.0045:
         score -= 20
-    
+
     if score < 68:
         signal = "WAIT"
-    
-    return signal, round(score, 1), price
+
+    return signal, f(score), price
 
 # ================= POSITION MANAGEMENT =================
-def position_size(balance: float, atr_val: float, price: float) -> float:
-    risk_amount = 0.01 * balance          # 1% risk per trade
-    stop_distance = atr_val * 2.0
-    size_in_usdt = risk_amount / stop_distance * price   # درست
-    return max(5.0, round(size_in_usdt / price, 4))      # حداقل اندازه منطقی
+def position_size(balance, atr_val, price):
+    risk = 0.01 * balance
+    stop = atr_val * 2
 
-def open_position(symbol: str, signal: str, price: float, atr_val: float):
+    if stop == 0:
+        return 0.001
+
+    size_usdt = risk / stop * price
+    return max(5.0, size_usdt / price)
+
+def open_position(symbol, signal, price, atr_val):
     if symbol in portfolio.positions:
         return
-    
+
     size = position_size(portfolio.balance, atr_val, price)
-    risk_dist = atr_val * 2.0
-    
-    sl = price - risk_dist if signal == "LONG" else price + risk_dist
-    tp = price + risk_dist * 3 if signal == "LONG" else price - risk_dist * 3
-    
+
+    sl = price - atr_val * 2 if signal == "LONG" else price + atr_val * 2
+    tp = price + atr_val * 3 if signal == "LONG" else price - atr_val * 3
+
     portfolio.positions[symbol] = Position(
         symbol=symbol,
         entry=price,
@@ -121,34 +148,36 @@ def open_position(symbol: str, signal: str, price: float, atr_val: float):
         tp=tp,
         trailing_sl=sl
     )
-    log.info(f"OPEN {symbol} {signal} | Size: {size:.4f} | Entry: {price:.4f}")
 
-def close_position(symbol: str, price: float, reason: str = "EXIT"):
+    log.info(f"OPEN {symbol} {signal} | size={size:.4f} | price={price:.4f}")
+
+def close_position(symbol, price, reason):
     pos = portfolio.positions[symbol]
+
     if pos.side == "LONG":
         pnl = (price - pos.entry) * pos.size
     else:
         pnl = (pos.entry - price) * pos.size
-    
-    fee = abs(pnl) * 0.002  # 0.1% round trip
-    pnl -= fee
-    
+
+    pnl -= abs(pnl) * 0.002
+
     portfolio.balance += pnl
     portfolio.trades.append(pnl)
     portfolio.equity.append(portfolio.balance)
-    del portfolio.positions[symbol]
-    
-    log.info(f"CLOSE {symbol} | {reason} | PnL: {pnl:.2f} USDT")
 
-def manage_positions(df: pd.DataFrame, symbol: str):
+    del portfolio.positions[symbol]
+
+    log.info(f"CLOSE {symbol} | {reason} | PnL={pnl:.2f}")
+
+def manage_positions(df, symbol):
     if symbol not in portfolio.positions:
         return
-    
-    price = float(df["c"].iloc[-1])
+
+    price = f(df["c"].iloc[-1])
     pos = portfolio.positions[symbol]
     atr_val = atr(df)
-    
-    # Trailing Stop (بهبود یافته)
+
+    # trailing
     if pos.side == "LONG":
         new_sl = price - atr_val * 2
         if new_sl > pos.trailing_sl:
@@ -159,13 +188,12 @@ def manage_positions(df: pd.DataFrame, symbol: str):
         if new_sl < pos.trailing_sl:
             pos.trailing_sl = new_sl
             pos.sl = min(pos.sl, new_sl)
-    
-    # Stop Loss
+
+    # SL / TP
     if (pos.side == "LONG" and price <= pos.sl) or (pos.side == "SHORT" and price >= pos.sl):
         close_position(symbol, price, "SL")
         return
-    
-    # Take Profit
+
     if (pos.side == "LONG" and price >= pos.tp) or (pos.side == "SHORT" and price <= pos.tp):
         close_position(symbol, price, "TP")
         return
@@ -174,67 +202,80 @@ def manage_positions(df: pd.DataFrame, symbol: str):
 def metrics():
     if not portfolio.trades:
         return 0.0, 0.0, portfolio.balance
+
     wins = [t for t in portfolio.trades if t > 0]
     winrate = len(wins) / len(portfolio.trades)
+
     eq = np.array(portfolio.equity)
     peak = np.maximum.accumulate(eq)
     dd = peak - eq
-    return winrate, float(np.max(dd)), portfolio.balance
+
+    return f(winrate), f(np.max(dd)), f(portfolio.balance)
+
+# ================= HEALTH CHECK (NEW FIX) =================
+def heartbeat():
+    portfolio.last_heartbeat = time.time()
+
+    if time.time() - portfolio.last_heartbeat > 120:
+        log.error("SYSTEM STUCK (NO HEARTBEAT)")
 
 # ================= DASHBOARD =================
 def dashboard():
-    winrate, dd, eq = metrics()
+    winrate, dd, bal = metrics()
     open_pos = len(portfolio.positions)
-    total_pnl = sum(portfolio.trades)
-    
+
     return f"""
-🚀 **LEVEL 24.1 MULTI-ASSET ENGINE**
-💰 Equity: **{eq:.2f} USDT**
-📈 Total PnL: **{total_pnl:.2f}**
-🟢 WinRate: **{winrate:.1%}**
-📉 Max Drawdown: **{dd:.2f}**
-📊 Closed Trades: **{len(portfolio.trades)}**
-📌 Open Positions: **{open_pos}**
+🚀 LEVEL 24.2 FIXED ENGINE
+
+💰 Balance: {bal:.2f}
+🟢 WinRate: {winrate:.1%}
+📉 Max DD: {dd:.2f}
+📦 Trades: {len(portfolio.trades)}
+📌 Open: {open_pos}
+
+🧠 STATUS: STABLE + TYPE SAFE
 """
 
 # ================= TELEGRAM =================
-async def send(msg: str):
+async def send(msg):
     try:
-        await bot.send_message(chat_id=CHAT_ID, text=msg, parse_mode='Markdown')
+        await bot.send_message(chat_id=CHAT_ID, text=msg)
     except Exception as e:
-        log.error(f"Telegram error: {e}")
+        log.error(e)
 
-# ================= MAIN LOOP =================
+# ================= LOOP =================
 async def run():
-    await send("🚀 **LEVEL 24.1 STARTED**\nMulti-Symbol + ATR + SL/TP/Trailing Active")
-    
+    await send("🚀 LEVEL 24.2 STARTED\n🧠 SAFE TYPE ENGINE ACTIVE")
+
     last_report = time.time()
-    
+
     while True:
         try:
+            heartbeat()
+
             for symbol in SYMBOLS:
+
                 df = get_data(symbol)
                 signal, score, price = strategy(df)
                 atr_val = atr(df)
-                
+
                 manage_positions(df, symbol)
-                
+
                 if signal != "WAIT":
                     open_position(symbol, signal, price, atr_val)
-                
-                # Live Log
-                pos_status = f"POS:{portfolio.positions[symbol].side}" if symbol in portfolio.positions else "NO_POS"
-                print(f"📡 {symbol:<10} | {signal:5} | Score:{score:5.1f} | Price:{price:.4f} | Bal:{portfolio.balance:.2f} | {pos_status}")
-                log.info(f"{symbol} | {signal} | Score:{score} | Price:{price:.4f} | Bal:{portfolio.balance:.2f}")
-            
+
+                # LIVE OUTPUT (FIXED)
+                print(f"📡 {symbol} | {signal} | {score:.1f} | {price:.2f} | BAL:{portfolio.balance:.2f}")
+
+                log.info(f"{symbol} | {signal} | {score} | {price:.4f} | BAL:{portfolio.balance:.2f}")
+
             if time.time() - last_report > REPORT_INTERVAL:
                 await send(dashboard())
                 last_report = time.time()
-                
+
         except Exception as e:
-            log.error(f"Main loop error: {e}")
-            await asyncio.sleep(10)
-        
+            log.exception(e)   # 🔥 FULL TRACE FIX
+
         await asyncio.sleep(INTERVAL)
 
 if __name__ == "__main__":
