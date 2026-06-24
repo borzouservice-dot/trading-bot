@@ -28,15 +28,16 @@ exchange = ccxt.binance({
 })
 
 logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("V5_QUANT")
+log = logging.getLogger("V5_1")
 
 # ================= STATE =================
 class Fund:
     def __init__(self):
         self.balance = 1000.0
         self.equity = [1000.0]
-        self.trades = []   # +1 win -1 loss
+        self.trades = []       # 1 win / -1 loss
         self.signals = []
+        self.last_signal = {}
         self.last_hb = time.time()
 
 fund = Fund()
@@ -57,15 +58,23 @@ def get_data(symbol):
 
 # ================= MARKET REGIME =================
 def market_regime(df):
-    vol = df["c"].pct_change().tail(50).std()
-    trend = df["c"].iloc[-1] > df["c"].rolling(50).mean().iloc[-1]
 
-    if vol < 0.0015:
+    ema20 = df["c"].ewm(span=20, adjust=False).mean().iloc[-1]
+    ema50 = df["c"].ewm(span=50, adjust=False).mean().iloc[-1]
+
+    distance = abs(ema20 - ema50) / ema50
+
+    if distance < 0.0008:
         return "CHOP"
-    return "TREND_UP" if trend else "TREND_DOWN"
+
+    if ema20 > ema50:
+        return "TREND_UP"
+
+    return "TREND_DOWN"
 
 # ================= SIGNAL ENGINE =================
 def signal_engine(df):
+
     price = df["c"].iloc[-1]
 
     ema9 = df["c"].ewm(span=9).mean().iloc[-1]
@@ -88,7 +97,7 @@ def signal_engine(df):
     elif rsi < 30:
         score += 15
 
-    if score < 70:
+    if score < 68:
         signal = "WAIT"
 
     return signal, score, price
@@ -110,8 +119,13 @@ def register(symbol, signal, price):
         "result": "OPEN"
     })
 
-def evaluate(price):
+def evaluate(symbol, price):
+
     for s in fund.signals:
+
+        if s["symbol"] != symbol:
+            continue
+
         if s["result"] != "OPEN":
             continue
 
@@ -121,17 +135,27 @@ def evaluate(price):
             if change > 0.003:
                 s["result"] = "WIN"
                 fund.trades.append(1)
+                fund.balance += 10
+                fund.equity.append(fund.balance)
+
             elif change < -0.003:
                 s["result"] = "LOSS"
                 fund.trades.append(-1)
+                fund.balance -= 10
+                fund.equity.append(fund.balance)
 
         if s["signal"] == "SHORT":
             if change < -0.003:
                 s["result"] = "WIN"
                 fund.trades.append(1)
+                fund.balance += 10
+                fund.equity.append(fund.balance)
+
             elif change > 0.003:
                 s["result"] = "LOSS"
                 fund.trades.append(-1)
+                fund.balance -= 10
+                fund.equity.append(fund.balance)
 
 # ================= METRICS =================
 def metrics():
@@ -147,25 +171,21 @@ def metrics():
     return wins, losses, acc, float(np.max(dd) if len(dd) else 0)
 
 # ================= DASHBOARD =================
-def dashboard(signal, score, regime):
+def dashboard():
+
     w, l, acc, dd = metrics()
 
     return f"""
-🚀 V5 QUANT FUNDS DASHBOARD
+🚀 V5.1 UNIFIED QUANT
 
-💰 Equity: {fund.balance:.2f}
+💰 Balance: {fund.balance:.2f}
 
-📊 PERFORMANCE
-✔️ Wins: {w}
+✔ Wins: {w}
 ❌ Losses: {l}
-📈 Accuracy: {acc:.2%}
+📊 Accuracy: {acc:.2%}
 📉 Drawdown: {dd:.2f}
 
-🧠 Market Regime: {regime}
-⚡ Signal: {signal}
-📊 Score: {score}
-
-🧬 System: QUANT ACTIVE ✔️
+🧬 System: ACTIVE ✔️
 """
 
 # ================= HEARTBEAT =================
@@ -173,47 +193,67 @@ async def heartbeat():
     w, l, acc, dd = metrics()
 
     await send(f"""
-🟢 V5 HEARTBEAT
+🟢 HEARTBEAT
 
-Status: LIVE QUANT SYSTEM
+Balance: {fund.balance:.2f}
 Accuracy: {acc:.2%}
 Wins: {w} | Losses: {l}
-Drawdown: {dd:.2f}
+DD: {dd:.2f}
 
 System OK ✔️
 """)
 
 # ================= MAIN LOOP =================
 async def run():
-    await send("🚀 V5 QUANT FUNDS STARTED")
+
+    await send("🚀 V5.1 UNIFIED QUANT STARTED")
+    await send("🟢 SYSTEM ONLINE")
 
     last_report = time.time()
     last_hb = time.time()
 
     while True:
+
         try:
+
             for sym in SYMBOLS:
 
                 df = get_data(sym)
 
                 regime = market_regime(df)
 
-                # ❌ No trading in chop
+                signal, score, price = signal_engine(df)
+
+                # CHOP FILTER
                 if regime == "CHOP":
                     log.info(f"{sym} | CHOP MARKET SKIP")
                     continue
 
-                signal, score, price = signal_engine(df)
-
+                # SIGNAL CHANGE ONLY
                 if signal != "WAIT":
-                    register(sym, signal, price)
 
-                evaluate(price)
+                    if signal != fund.last_signal.get(sym):
+
+                        register(sym, signal, price)
+
+                        await send(f"""
+🚨 NEW SIGNAL
+
+{sym}
+Signal: {signal}
+Score: {score}
+Price: {price:.2f}
+Regime: {regime}
+""")
+
+                        fund.last_signal[sym] = signal
+
+                evaluate(sym, price)
 
                 log.info(f"{sym} | {regime} | {signal} | {score} | {price}")
 
             if time.time() - last_report > REPORT_INTERVAL:
-                await send(dashboard(signal, score, regime))
+                await send(dashboard())
                 last_report = time.time()
 
             if time.time() - last_hb > HEARTBEAT:
@@ -224,6 +264,7 @@ async def run():
             log.error(e)
 
         await asyncio.sleep(INTERVAL)
+
 
 if __name__ == "__main__":
     asyncio.run(run())
