@@ -1,10 +1,10 @@
+```python
 import ccxt
 import asyncio
 import pandas as pd
-import numpy as np
 import logging
+import time
 from telegram import Bot
-from telegram.constants import ParseMode
 from dotenv import load_dotenv
 import os
 
@@ -14,8 +14,10 @@ load_dotenv()
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-SYMBOLS = ["SOL/USDT", "BTC/USDT", "ETH/USDT"]
-INTERVAL = 10
+SYMBOL = "SOL/USDT"
+
+INTERVAL = 30
+STATUS_INTERVAL = 1800
 
 bot = Bot(token=TOKEN)
 
@@ -27,20 +29,29 @@ exchange = ccxt.binance({
 # ================= LOG =================
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s | %(message)s"
+    format="%(asctime)s | %(levelname)s | %(message)s"
 )
 
-log = logging.getLogger("LEVEL22")
+log = logging.getLogger("LEVEL22.5")
 
 # ================= DATA =================
-def get_data(symbol, limit=150):
-    ohlcv = exchange.fetch_ohlcv(symbol, "1m", limit=limit)
-    return pd.DataFrame(ohlcv, columns=["t","o","h","l","c","v"])
+def get_data(limit=150):
 
-# ================= SIMPLE STRATEGY CORE =================
+    ohlcv = exchange.fetch_ohlcv(
+        SYMBOL,
+        timeframe="1m",
+        limit=limit
+    )
+
+    return pd.DataFrame(
+        ohlcv,
+        columns=["t", "o", "h", "l", "c", "v"]
+    )
+
+# ================= AI SCORE =================
 def strategy_score(df):
 
-    price = df["c"].iloc[-1]
+    price = float(df["c"].iloc[-1])
 
     ema_fast = df["c"].ewm(span=9).mean().iloc[-1]
     ema_slow = df["c"].ewm(span=21).mean().iloc[-1]
@@ -52,18 +63,23 @@ def strategy_score(df):
 
     if ema_fast > ema_slow:
         score += 20
+        trend = "BULLISH"
     else:
         score -= 20
+        trend = "BEARISH"
 
     if vol < 0.002:
         score += 10
     else:
         score -= 10
 
-    if price > df["h"].rolling(20).mean().iloc[-1]:
+    high_mean = df["h"].rolling(20).mean().iloc[-1]
+    low_mean = df["l"].rolling(20).mean().iloc[-1]
+
+    if price > high_mean:
         score += 10
 
-    if price < df["l"].rolling(20).mean().iloc[-1]:
+    if price < low_mean:
         score -= 10
 
     if score >= 70:
@@ -73,102 +89,195 @@ def strategy_score(df):
     else:
         signal = "WAIT"
 
-    return signal, score, price
+    return signal, score, price, trend
 
-# ================= BACKTEST LIGHT (rolling win estimate) =================
+# ================= WIN EST =================
 def pseudo_backtest(df):
 
-    closes = df["c"]
-    returns = closes.pct_change()
+    returns = df["c"].pct_change()
 
-    win_rate = (returns > 0).rolling(20).mean().iloc[-1]
+    wr = (
+        (returns > 0)
+        .rolling(20)
+        .mean()
+        .iloc[-1]
+    )
 
-    return float(win_rate)
+    if pd.isna(wr):
+        return 0.50
 
-# ================= ANALYZE ALL SYMBOLS =================
-def analyze_all():
+    return float(wr)
 
-    results = []
+# ================= REGIME =================
+def market_regime(df):
 
-    for symbol in SYMBOLS:
+    volatility = df["c"].pct_change().std()
 
-        df = get_data(symbol)
+    if volatility < 0.001:
+        return "RANGE"
 
-        signal, score, price = strategy_score(df)
-        win_rate = pseudo_backtest(df)
+    if volatility > 0.005:
+        return "VOLATILE"
 
-        results.append({
-            "symbol": symbol,
-            "signal": signal,
-            "score": score,
-            "price": price,
-            "win_rate": win_rate
-        })
+    return "TREND"
 
-    return sorted(results, key=lambda x: x["score"], reverse=True)
+# ================= FORMAT SIGNAL =================
+def format_signal(signal,
+                  score,
+                  price,
+                  trend,
+                  win_rate,
+                  regime):
 
-# ================= FORMAT =================
-def format_report(best, all_results):
+    sl = price * 0.99
 
-    msg = f"""
-🚀 LEVEL 22 AI PORTFOLIO ENGINE
+    if signal == "LONG":
 
-🏆 BEST SETUP:
-{best['symbol']}
+        tp1 = price * 1.01
+        tp2 = price * 1.02
+        tp3 = price * 1.03
 
-{ "🟢 LONG" if best['signal']=="LONG" else "🔴 SHORT" if best['signal']=="SHORT" else "⚪ WAIT" }
+        side = "🟢 LONG 📈"
 
-📍 Price: {best['price']:.2f}
-🧠 Score: {best['score']}/100
-📊 Win Est: {best['win_rate']:.2f}
+    elif signal == "SHORT":
 
-------------------------
+        tp1 = price * 0.99
+        tp2 = price * 0.98
+        tp3 = price * 0.97
 
-📊 ALL MARKETS:
+        side = "🔴 SHORT 📉"
 
+    else:
+
+        return f"""
+📊 SOL/USDT
+
+⚪ WAIT
+
+⚡ AI Score: {score}/100
+📈 Trend: {trend}
+
+🧠 Regime: {regime}
+
+📡 LEVEL 22.5 AI ENGINE
 """
 
-    for r in all_results:
-        msg += f"""
-• {r['symbol']}
-  ➜ {r['signal']} | {r['score']} | WR:{r['win_rate']:.2f}
+    return f"""
+🚀 SOL/USDT
+
+{side}
+
+📍 Entry: Market
+
+⚡ AI Score: {score}/100
+📊 Trend: {trend}
+📈 Win Est: {win_rate:.2f}
+
+🔥 Risk: 1%
+⚖️ Leverage: x1
+
+⛔ Stop Loss: {sl:.2f}
+
+🎯 TP1: {tp1:.2f}
+🎯 TP2: {tp2:.2f}
+🎯 TP3: {tp3:.2f}
+
+🧠 Market Regime: {regime}
+
+📡 LEVEL 22.5 AI ENGINE
 """
 
-    msg += "\n📡 Mode: PORTFOLIO AI DECISION ENGINE"
+# ================= STATUS =================
+def format_status(score):
 
-    return msg.strip()
+    return f"""
+📊 SYSTEM STATUS
+
+🟢 ONLINE
+
+🚀 Symbol: SOL/USDT
+
+📈 Last Score: {score}
+
+🧠 Engine: LEVEL 22.5
+
+⏰ Running Normally
+"""
 
 # ================= TELEGRAM =================
 async def send(msg):
+
     try:
-        await bot.send_message(CHAT_ID, msg, parse_mode=ParseMode.HTML)
+        await bot.send_message(
+            chat_id=CHAT_ID,
+            text=msg
+        )
+
     except Exception as e:
-        log.error(e)
+        log.error(f"Telegram Error: {e}")
 
 # ================= LOOP =================
 async def run():
 
-    await send("🚀 LEVEL 22 STARTED\n🧠 MULTI-ASSET AI PORTFOLIO ENGINE")
+    await send(
+"""
+🚀 BOT STARTED
 
-    last_best = None
+🧠 LEVEL 22.5 ACTIVE
+
+🚀 SYMBOL: SOL/USDT
+
+📡 SYSTEM ONLINE
+⚡ READY FOR SIGNALS
+"""
+    )
+
+    last_signal = None
+    last_status = time.time()
 
     while True:
 
         try:
 
-            results = analyze_all()
-            best = results[0]
+            df = get_data()
 
-            log.info(f"BEST: {best['symbol']} | {best['score']}")
+            signal, score, price, trend = strategy_score(df)
 
-            if last_best != best["symbol"]:
+            win_rate = pseudo_backtest(df)
 
-                msg = format_report(best, results)
+            regime = market_regime(df)
+
+            current_signal = f"{signal}_{score}"
+
+            log.info(
+                f"{signal} | Score:{score} | Price:{price}"
+            )
+
+            if current_signal != last_signal:
+
+                msg = format_signal(
+                    signal,
+                    score,
+                    price,
+                    trend,
+                    win_rate,
+                    regime
+                )
+
                 await send(msg)
 
-                last_best = best["symbol"]
+                last_signal = current_signal
+
+            if time.time() - last_status > STATUS_INTERVAL:
+
+                await send(
+                    format_status(score)
+                )
+
+                last_status = time.time()
 
         except Exception as e:
+
             log.error(f"ERROR: {e}")
 
         await asyncio.sleep(INTERVAL)
@@ -176,3 +285,4 @@ async def run():
 # ================= START =================
 if __name__ == "__main__":
     asyncio.run(run())
+```
