@@ -3,135 +3,177 @@ import asyncio
 import pandas as pd
 import numpy as np
 import logging
+import time
 import os
 from dataclasses import dataclass
 from dotenv import load_dotenv
+from telegram import Bot
 
 load_dotenv()
 
+# ================= CONFIG =================
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 SYMBOLS = ["SOL/USDT", "BTC/USDT", "ETH/USDT"]
+TIMEFRAME = "1m"
 INTERVAL = 30
+REPORT_INTERVAL = 600
 
-exchange = ccxt.binance({"enableRateLimit": True})
+bot = Bot(token=TOKEN)
 
-logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("LEVEL27")
+exchange = ccxt.binance({
+    "enableRateLimit": True,
+    "options": {"defaultType": "spot"}
+})
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+log = logging.getLogger("UNIFIED_ENGINE")
+
+# ================= STATE =================
+@dataclass
+class State:
+    balance: float = 1000.0
+    trades: list = None
+    equity: list = None
+
+    def __post_init__(self):
+        self.trades = []
+        self.equity = [self.balance]
+
+state = State()
 
 # ================= DATA =================
 def get_data(symbol):
-    df = exchange.fetch_ohlcv(symbol, "1m", limit=200)
-    df = pd.DataFrame(df, columns=["t","o","h","l","c","v"])
-    df = df.apply(pd.to_numeric)
-    return df
+    ohlcv = exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=200)
+    df = pd.DataFrame(ohlcv, columns=["t","o","h","l","c","v"])
 
-# ================= REGIME =================
-def regime(df):
-    ema_fast = df["c"].ewm(10).mean().iloc[-1]
-    ema_slow = df["c"].ewm(30).mean().iloc[-1]
-    vol = df["c"].pct_change().std()
+    # FIX CRITICAL (numpy → pandas safe)
+    for col in ["o","h","l","c"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    if abs(ema_fast - ema_slow) / ema_slow > 0.002:
-        return "TREND"
-    if vol > 0.005:
-        return "VOLATILE"
-    return "CHOP"
+    return df.dropna()
 
-# ================= CONFIDENCE ENGINE =================
-def confidence(df):
-    ema9 = df["c"].ewm(9).mean().iloc[-1]
-    ema21 = df["c"].ewm(21).mean().iloc[-1]
+# ================= INDICATORS =================
+def atr(df, period=14):
+    high = df["h"]
+    low = df["l"]
+    close = df["c"]
 
-    trend_score = 60 if ema9 > ema21 else 40
+    tr1 = high - low
+    tr2 = (high - close.shift()).abs()
+    tr3 = (low - close.shift()).abs()
 
-    momentum = df["c"].pct_change().tail(10).mean()
-    momentum_score = 60 if momentum > 0 else 40
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
 
-    vol = df["c"].pct_change().std()
-    vol_score = 80 if vol < 0.003 else 50 if vol < 0.005 else 30
-
-    reg = regime(df)
-    reg_score = 80 if reg == "TREND" else 40 if reg == "VOLATILE" else 20
-
-    total = (
-        trend_score * 0.35 +
-        momentum_score * 0.25 +
-        vol_score * 0.20 +
-        reg_score * 0.20
-    )
-
-    return round(total, 1), reg
-
-# ================= KELLY SIZE =================
-def kelly(winrate, balance, confidence):
-    base_risk = 0.01
-
-    adj = (confidence / 100)
-    risk = base_risk * adj
-
-    return balance * risk
+    return float(tr.rolling(period).mean().iloc[-1])
 
 # ================= STRATEGY =================
-def signal(df):
-    price = df["c"].iloc[-1]
+def strategy(df):
+    price = float(df["c"].iloc[-1])
 
-    ema9 = df["c"].ewm(9).mean().iloc[-1]
-    ema21 = df["c"].ewm(21).mean().iloc[-1]
+    ema9 = df["c"].ewm(span=9).mean().iloc[-1]
+    ema21 = df["c"].ewm(span=21).mean().iloc[-1]
+
+    vol = df["c"].pct_change().tail(30).std()
+
+    score = 50
+    signal = "WAIT"
 
     if ema9 > ema21:
-        return "LONG", price
-    elif ema9 < ema21:
-        return "SHORT", price
-    return "WAIT", price
+        score += 30
+        signal = "LONG"
+    else:
+        score -= 30
+        signal = "SHORT"
 
-# ================= STATE =================
-state = {
-    "balance": 1000.0,
-    "trades": 0
-}
+    # FILTER (anti-chop)
+    if vol < 0.0015:
+        score -= 10
+        signal = "WAIT"
+
+    if score < 70:
+        signal = "WAIT"
+
+    return signal, float(score), price
 
 # ================= EXECUTION =================
-def execute(symbol, sig, price, conf, reg):
+def simulate_trade(signal, price):
+    if signal == "WAIT":
+        return 0
 
-    if conf < 78:
-        return
+    move = np.random.normal(0, 0.01)
 
-    if reg == "CHOP":
-        return
+    win_prob = 0.55 if signal in ["LONG", "SHORT"] else 0.5
+    result = 1 if np.random.random() < win_prob else -1
 
-    if sig == "WAIT":
-        return
+    pnl = result * 5
+    state.balance += pnl
+    state.equity.append(state.balance)
+    state.trades.append(pnl)
 
-    risk_amount = kelly(0.55, state["balance"], conf)
+    return pnl
 
-    pnl = np.random.normal(0.002, 0.01) * risk_amount
+# ================= METRICS =================
+def metrics():
+    if len(state.trades) == 0:
+        return 0.0, 0.0
 
-    state["balance"] += pnl
-    state["trades"] += 1
+    winrate = len([t for t in state.trades if t > 0]) / len(state.trades)
 
-    log.info(f"{symbol} | {sig} | Conf:{conf} | Reg:{reg} | PnL:{pnl:.2f} | Bal:{state['balance']:.2f}")
+    eq = np.array(state.equity)
+    peak = np.maximum.accumulate(eq)
+    dd = np.max(peak - eq)
 
-# ================= LOOP =================
+    return float(winrate), float(dd)
+
+# ================= DASHBOARD =================
+def dashboard():
+    winrate, dd = metrics()
+
+    return f"""
+🚀 UNIFIED TRADING ENGINE v1
+
+💰 Balance: {state.balance:.2f}
+📊 WinRate: {winrate:.1%}
+📉 Max DD: {dd:.2f}
+📈 Trades: {len(state.trades)}
+"""
+
+# ================= TELEGRAM =================
+async def send(msg):
+    try:
+        await bot.send_message(chat_id=CHAT_ID, text=msg)
+    except Exception as e:
+        log.error(e)
+
+# ================= MAIN LOOP =================
 async def run():
+
+    await send("🚀 UNIFIED ENGINE STARTED")
+
+    last_report = time.time()
 
     while True:
         try:
-            for s in SYMBOLS:
+            for symbol in SYMBOLS:
 
-                df = get_data(s)
+                df = get_data(symbol)
+                signal, score, price = strategy(df)
 
-                conf, reg = confidence(df)
-                sig, price = signal(df)
+                pnl = simulate_trade(signal, price)
 
-                execute(s, sig, price, conf, reg)
+                log.info(f"{symbol} | {signal} | {score:.1f} | {price:.2f} | BAL:{state.balance:.2f}")
 
-            await asyncio.sleep(INTERVAL)
+            if time.time() - last_report > REPORT_INTERVAL:
+                await send(dashboard())
+                last_report = time.time()
 
         except Exception as e:
-            log.error(e)
-            await asyncio.sleep(5)
+            log.error(f"ERROR: {e}")
 
+        await asyncio.sleep(INTERVAL)
+
+# ================= START =================
 if __name__ == "__main__":
     asyncio.run(run())
