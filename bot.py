@@ -3,44 +3,28 @@ import asyncio
 import pandas as pd
 import numpy as np
 import logging
-import time
-from dataclasses import dataclass
-from telegram import Bot
-from dotenv import load_dotenv
 import os
+from dataclasses import dataclass
+from dotenv import load_dotenv
 
 load_dotenv()
 
-# ================= CONFIG =================
 TOKEN = os.getenv("TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 SYMBOLS = ["SOL/USDT", "BTC/USDT", "ETH/USDT"]
 INTERVAL = 30
-REPORT_INTERVAL = 600
 
-bot = Bot(token=TOKEN)
-
-exchange = ccxt.binance({
-    "enableRateLimit": True,
-    "options": {"defaultType": "spot"}
-})
+exchange = ccxt.binance({"enableRateLimit": True})
 
 logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("LEVEL26")
-
-# ================= SAFE =================
-def f(x):
-    try:
-        return float(x.iloc[-1]) if hasattr(x, "iloc") else float(x)
-    except:
-        return 0.0
+log = logging.getLogger("LEVEL27")
 
 # ================= DATA =================
 def get_data(symbol):
-    ohlcv = exchange.fetch_ohlcv(symbol, "1m", limit=200)
-    df = pd.DataFrame(ohlcv, columns=["t","o","h","l","c","v"])
-    df = df.apply(pd.to_numeric, errors="coerce").dropna()
+    df = exchange.fetch_ohlcv(symbol, "1m", limit=200)
+    df = pd.DataFrame(df, columns=["t","o","h","l","c","v"])
+    df = df.apply(pd.to_numeric)
     return df
 
 # ================= REGIME =================
@@ -55,108 +39,93 @@ def regime(df):
         return "VOLATILE"
     return "CHOP"
 
-# ================= ATR =================
-def atr(df):
-    h, l, c = df["h"], df["l"], df["c"]
+# ================= CONFIDENCE ENGINE =================
+def confidence(df):
+    ema9 = df["c"].ewm(9).mean().iloc[-1]
+    ema21 = df["c"].ewm(21).mean().iloc[-1]
 
-    tr = pd.concat([
-        h - l,
-        (h - c.shift()).abs(),
-        (l - c.shift()).abs()
-    ], axis=1).max(axis=1)
+    trend_score = 60 if ema9 > ema21 else 40
 
-    val = tr.rolling(14).mean().iloc[-1]
-    return float(val) if not np.isnan(val) else float(c.iloc[-1] * 0.01)
+    momentum = df["c"].pct_change().tail(10).mean()
+    momentum_score = 60 if momentum > 0 else 40
 
-# ================= SIGNAL ENGINE =================
-def signal_engine(df):
-    price = float(df["c"].iloc[-1])
+    vol = df["c"].pct_change().std()
+    vol_score = 80 if vol < 0.003 else 50 if vol < 0.005 else 30
+
+    reg = regime(df)
+    reg_score = 80 if reg == "TREND" else 40 if reg == "VOLATILE" else 20
+
+    total = (
+        trend_score * 0.35 +
+        momentum_score * 0.25 +
+        vol_score * 0.20 +
+        reg_score * 0.20
+    )
+
+    return round(total, 1), reg
+
+# ================= KELLY SIZE =================
+def kelly(winrate, balance, confidence):
+    base_risk = 0.01
+
+    adj = (confidence / 100)
+    risk = base_risk * adj
+
+    return balance * risk
+
+# ================= STRATEGY =================
+def signal(df):
+    price = df["c"].iloc[-1]
 
     ema9 = df["c"].ewm(9).mean().iloc[-1]
     ema21 = df["c"].ewm(21).mean().iloc[-1]
-    rsi = 50  # ساده نگه داشتیم (قابل ارتقا)
 
-    vol = df["c"].pct_change().std()
-    rg = regime(df)
-
-    score = 50
-    signal = "WAIT"
-
-    # trend
     if ema9 > ema21:
-        score += 25
-        signal = "LONG"
-    else:
-        score -= 25
-        signal = "SHORT"
+        return "LONG", price
+    elif ema9 < ema21:
+        return "SHORT", price
+    return "WAIT", price
 
-    # regime filter
-    if rg == "CHOP":
-        score -= 30
-    if rg == "VOLATILE":
-        score -= 10
-
-    # volatility filter
-    if vol < 0.0015:
-        score += 10
-    elif vol > 0.005:
-        score -= 20
-
-    # final decision
-    if score < 75:
-        signal = "WAIT"
-
-    return signal, score, price, rg
-
-# ================= EXECUTION =================
-@dataclass
-class Position:
-    symbol: str
-    entry: float
-    side: str
-    sl: float
-    tp: float
-
-portfolio = {
+# ================= STATE =================
+state = {
     "balance": 1000.0,
-    "position": {}
+    "trades": 0
 }
 
-def open_pos(symbol, signal, price, atrv):
-    if symbol in portfolio["position"]:
+# ================= EXECUTION =================
+def execute(symbol, sig, price, conf, reg):
+
+    if conf < 78:
         return
 
-    sl = price - atrv*2 if signal=="LONG" else price + atrv*2
-    tp = price + atrv*3 if signal=="LONG" else price - atrv*3
+    if reg == "CHOP":
+        return
 
-    portfolio["position"][symbol] = Position(symbol, price, signal, sl, tp)
-    log.info(f"OPEN {symbol} {signal} @ {price}")
+    if sig == "WAIT":
+        return
 
-def close_pos(symbol, price):
-    pos = portfolio["position"][symbol]
+    risk_amount = kelly(0.55, state["balance"], conf)
 
-    pnl = (price - pos.entry) if pos.side=="LONG" else (pos.entry - price)
-    pnl *= 10
+    pnl = np.random.normal(0.002, 0.01) * risk_amount
 
-    portfolio["balance"] += pnl
-    del portfolio["position"][symbol]
+    state["balance"] += pnl
+    state["trades"] += 1
 
-    log.info(f"CLOSE {symbol} PnL={pnl:.2f}")
+    log.info(f"{symbol} | {sig} | Conf:{conf} | Reg:{reg} | PnL:{pnl:.2f} | Bal:{state['balance']:.2f}")
 
 # ================= LOOP =================
 async def run():
+
     while True:
         try:
             for s in SYMBOLS:
+
                 df = get_data(s)
 
-                signal, score, price, rg = signal_engine(df)
-                atrv = atr(df)
+                conf, reg = confidence(df)
+                sig, price = signal(df)
 
-                if signal != "WAIT":
-                    open_pos(s, signal, price, atrv)
-
-                log.info(f"{s} | {signal} | {score:.1f} | {rg} | {price}")
+                execute(s, sig, price, conf, reg)
 
             await asyncio.sleep(INTERVAL)
 
