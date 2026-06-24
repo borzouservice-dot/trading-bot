@@ -4,10 +4,10 @@ import pandas as pd
 import numpy as np
 import logging
 import time
-import os
 from dataclasses import dataclass
 from telegram import Bot
 from dotenv import load_dotenv
+import os
 
 load_dotenv()
 
@@ -27,25 +27,24 @@ exchange = ccxt.binance({
 })
 
 logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("V4.1_PRO")
+log = logging.getLogger("V4.2")
 
 # ================= STATE =================
 @dataclass
-class Position:
+class SignalTrade:
     symbol: str
+    signal: str
     entry: float
-    size: float
-    side: str
-    sl: float
-    tp: float
+    result: str = "OPEN"  # WIN / LOSS / OPEN
 
 class Portfolio:
     def __init__(self):
         self.balance = 1000.0
-        self.positions = {}
+        self.signals = []
         self.trades = []
         self.equity = [1000.0]
         self.last_signal = {}
+        self.last_heartbeat = time.time()
 
 portfolio = Portfolio()
 
@@ -54,7 +53,7 @@ def send(msg):
     try:
         bot.send_message(chat_id=CHAT_ID, text=msg)
     except Exception as e:
-        log.error(f"Telegram error: {e}")
+        log.error(e)
 
 # ================= DATA =================
 def get_data(symbol):
@@ -91,78 +90,84 @@ def strategy(df):
 
     return signal, score, price
 
-# ================= POSITION =================
-def open_position(symbol, signal, price):
-    if symbol in portfolio.positions:
-        return
+# ================= TRACK SIGNALS =================
+def register_signal(symbol, signal, price):
+    portfolio.signals.append(SignalTrade(symbol, signal, price))
 
-    sl = price * (0.99 if signal == "LONG" else 1.01)
-    tp = price * (1.03 if signal == "LONG" else 0.97)
+def evaluate_signals(current_price):
+    """
+    بررسی اینکه سیگنال‌ها درست بودن یا نه
+    """
+    for s in portfolio.signals:
+        if s.result != "OPEN":
+            continue
 
-    portfolio.positions[symbol] = Position(symbol, price, 10, signal, sl, tp)
+        if s.signal == "WAIT":
+            s.result = "SKIP"
+            continue
+
+        change = (current_price - s.entry) / s.entry
+
+        if s.signal == "LONG":
+            if change > 0:
+                s.result = "WIN"
+            elif change < -0.003:
+                s.result = "LOSS"
+
+        if s.signal == "SHORT":
+            if change < 0:
+                s.result = "WIN"
+            elif change > 0.003:
+                s.result = "LOSS"
+
+# ================= STATS =================
+def stats():
+    wins = len([s for s in portfolio.signals if s.result == "WIN"])
+    losses = len([s for s in portfolio.signals if s.result == "LOSS"])
+    total = wins + losses
+
+    accuracy = wins / total if total > 0 else 0
+
+    return wins, losses, accuracy
+
+# ================= DASHBOARD =================
+def dashboard(signal, price, score):
+    wins, losses, acc = stats()
+
+    return f"""
+🚀 V4.2 SIGNAL PERFORMANCE DASHBOARD
+
+💰 Balance: {portfolio.balance:.2f}
+
+📊 Signal Stats:
+✔️ Wins: {wins}
+❌ Losses: {losses}
+📈 Accuracy: {acc:.2%}
+📦 Total Tracked: {wins + losses}
+
+🧠 Current Signal: {signal}
+⚡ Score: {score}
+📍 Price: {price:.2f}
+"""
+
+# ================= HEARTBEAT =================
+def heartbeat():
+    wins, losses, acc = stats()
 
     send(f"""
-🚀 OPEN POSITION
+🟢 V4.2 HEARTBEAT
 
-Symbol: {symbol}
-Side: {signal}
-Entry: {price:.2f}
-SL: {sl:.2f}
-TP: {tp:.2f}
+System: ACTIVE
+Accuracy: {acc:.2%}
+Wins: {wins} | Losses: {losses}
+Signals tracked: {len(portfolio.signals)}
+
+Bot is LIVE ✔️
 """)
-
-def close_position(symbol, price, reason):
-    pos = portfolio.positions[symbol]
-
-    pnl = (price - pos.entry) * pos.size if pos.side == "LONG" else (pos.entry - price) * pos.size
-
-    portfolio.balance += pnl
-    portfolio.trades.append(pnl)
-
-    del portfolio.positions[symbol]
-
-    send(f"""
-❌ CLOSE POSITION ({reason})
-
-Symbol: {symbol}
-Side: {pos.side}
-PnL: {pnl:.2f}
-Balance: {portfolio.balance:.2f}
-""")
-
-# ================= MANAGE =================
-def manage(symbol, price):
-    if symbol not in portfolio.positions:
-        return
-
-    pos = portfolio.positions[symbol]
-
-    if pos.side == "LONG":
-        if price <= pos.sl:
-            close_position(symbol, price, "SL")
-        elif price >= pos.tp:
-            close_position(symbol, price, "TP")
-
-    else:
-        if price >= pos.sl:
-            close_position(symbol, price, "SL")
-        elif price <= pos.tp:
-            close_position(symbol, price, "TP")
-
-# ================= SIGNAL CONTROL =================
-def signal_controller(symbol, signal):
-    last = portfolio.last_signal.get(symbol)
-
-    # فقط اگر تغییر کرده باشد
-    if last == signal:
-        return False
-
-    portfolio.last_signal[symbol] = signal
-    return True
 
 # ================= LOOP =================
 async def run():
-    send("🚀 V4.1 PRO STARTED")
+    send("🚀 V4.2 STARTED")
 
     last_report = time.time()
 
@@ -173,31 +178,21 @@ async def run():
                 df = get_data(s)
                 signal, score, price = strategy(df)
 
-                manage(s, price)
+                register_signal(s, signal, price)
+                evaluate_signals(price)
 
-                # signal change filter
-                if signal_controller(s, signal):
+                log.info(f"{s} | {signal} | {score} | {price}")
 
-                    log.info(f"NEW SIGNAL {s} {signal}")
-
-                    if signal != "WAIT":
-                        open_position(s, signal, price)
-
-                log.info(f"{s} | {signal} | {score:.1f} | {price:.2f}")
-
-            # periodic report
             if time.time() - last_report > REPORT_INTERVAL:
-                send(f"""
-📊 V4.1 REPORT
-
-Balance: {portfolio.balance:.2f}
-Open Positions: {len(portfolio.positions)}
-Trades: {len(portfolio.trades)}
-""")
+                send(dashboard(signal, price, score))
                 last_report = time.time()
 
+            if time.time() - portfolio.last_heartbeat > 120:
+                heartbeat()
+                portfolio.last_heartbeat = time.time()
+
         except Exception as e:
-            log.error(f"Loop error: {e}")
+            log.error(e)
 
         await asyncio.sleep(INTERVAL)
 
