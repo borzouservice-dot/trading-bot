@@ -1,6 +1,7 @@
 import ccxt
 import asyncio
 import pandas as pd
+import numpy as np
 import logging
 import time
 from telegram import Bot
@@ -16,7 +17,7 @@ CHAT_ID = os.getenv("CHAT_ID")
 SYMBOL = "SOL/USDT"
 
 INTERVAL = 30
-STATUS_INTERVAL = 1800
+STATUS_INTERVAL = 600
 
 bot = Bot(token=TOKEN)
 
@@ -27,32 +28,29 @@ exchange = ccxt.binance({
 
 # ================= LOG =================
 logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("LEVEL22.6")
+log = logging.getLogger("LEVEL22.7")
+
+# ================= STATS =================
+stats = {
+    "signals": 0,
+    "wins": 0,
+    "losses": 0,
+    "equity": 1000.0,
+    "peak": 1000.0,
+    "drawdown": 0.0
+}
+
+RISK_PER_TRADE = 10
 
 # ================= DATA =================
-def get_data(timeframe="1m", limit=150):
-    ohlcv = exchange.fetch_ohlcv(SYMBOL, timeframe, limit=limit)
+def get_data(limit=150):
+    ohlcv = exchange.fetch_ohlcv(SYMBOL, "1m", limit=limit)
     return pd.DataFrame(ohlcv, columns=["t","o","h","l","c","v"])
 
-# ================= TREND ENGINE =================
-def trend_5m():
-
-    df = get_data("5m", 120)
-
-    ema_fast = df["c"].ewm(span=9).mean().iloc[-1]
-    ema_slow = df["c"].ewm(span=21).mean().iloc[-1]
-
-    if ema_fast > ema_slow:
-        return "BULLISH"
-    elif ema_fast < ema_slow:
-        return "BEARISH"
-    else:
-        return "RANGE"
-
-# ================= SCORE ENGINE =================
+# ================= STRATEGY =================
 def strategy_score(df):
 
-    price = df["c"].iloc[-1]
+    price = float(df["c"].iloc[-1])
 
     ema_fast = df["c"].ewm(span=9).mean().iloc[-1]
     ema_slow = df["c"].ewm(span=21).mean().iloc[-1]
@@ -60,11 +58,14 @@ def strategy_score(df):
     vol = df["c"].pct_change().std()
 
     score = 50
+    trend = "NEUTRAL"
 
     if ema_fast > ema_slow:
         score += 20
+        trend = "BULLISH"
     else:
         score -= 20
+        trend = "BEARISH"
 
     if vol < 0.002:
         score += 10
@@ -84,73 +85,44 @@ def strategy_score(df):
     else:
         signal = "WAIT"
 
-    return signal, score, price
+    return signal, score, price, trend
 
-# ================= FILTER (IMPORTANT) =================
-def final_decision(signal, trend):
+# ================= PAPER TRADE =================
+def simulate_trade(signal):
 
-    if trend == "RANGE":
-        return "WAIT"
+    if signal == "WAIT":
+        return 0
 
-    if trend == "BULLISH" and signal == "LONG":
-        return "LONG"
+    move = np.random.normal(0.002, 0.01)
+    pnl = RISK_PER_TRADE * (move * 100)
 
-    if trend == "BEARISH" and signal == "SHORT":
-        return "SHORT"
+    return pnl
 
-    return "WAIT"
+# ================= DASHBOARD =================
+def dashboard(score, trend):
 
-# ================= FORMAT =================
-def format_signal(signal, score, price, trend):
-
-    sl = price * 0.99
-
-    if signal == "LONG":
-        tp1 = price * 1.01
-        tp2 = price * 1.02
-        tp3 = price * 1.03
-
-        icon = "🟢 LONG 📈"
-
-    elif signal == "SHORT":
-        tp1 = price * 0.99
-        tp2 = price * 0.98
-        tp3 = price * 0.97
-
-        icon = "🔴 SHORT 📉"
-
-    else:
-        return f"""
-🚀 SOL/USDT
-
-⚪ WAIT
-
-📊 Score: {score}
-📈 Trend: {trend}
-
-📡 LEVEL 22.6 AI ENGINE
-"""
+    total = stats["wins"] + stats["losses"]
+    winrate = stats["wins"] / total if total > 0 else 0
 
     return f"""
+📊 LEVEL 22.7 PRO DASHBOARD
+
 🚀 SOL/USDT
 
-{icon}
+📈 Signals: {stats['signals']}
 
-📍 Entry: Market
+🟢 Wins: {stats['wins']}
+🔴 Losses: {stats['losses']}
+📊 WinRate: {winrate:.2f}
 
-⚡ Score: {score}/100
-📈 Trend: {trend}
+💰 Equity: {stats['equity']:.2f} USDT
+📈 Peak: {stats['peak']:.2f}
+📉 Drawdown: {stats['drawdown']:.2f}
 
-🔥 Risk: 1%
-⚖️ Leverage: x1
+🧠 Last Score: {score}
+📡 Trend: {trend}
 
-⛔ SL: {sl:.2f}
-
-🎯 TP1: {tp1:.2f}
-🎯 TP2: {tp2:.2f}
-🎯 TP3: {tp3:.2f}
-
-📡 LEVEL 22.6 AI ENGINE
+⚡ PAPER TRADING MODE
 """
 
 # ================= TELEGRAM =================
@@ -166,54 +138,44 @@ async def run():
     await send("""
 🚀 BOT STARTED
 
-🧠 LEVEL 22.6 ACTIVE
+🧠 LEVEL 22.7 ACTIVE
 🚀 SYMBOL: SOL/USDT
 
-📡 SYSTEM ONLINE
-⚡ TREND FILTER ENABLED
+📊 PRO DASHBOARD ENABLED
+⚡ PAPER TRADING MODE
 """)
 
-    last_signal = None
     last_status = time.time()
 
     while True:
 
         try:
 
-            df = get_data("1m")
+            df = get_data()
 
-            signal, score, price = strategy_score(df)
+            signal, score, price, trend = strategy_score(df)
 
-            trend = trend_5m()
+            stats["signals"] += 1
 
-            decision = final_decision(signal, trend)
+            pnl = simulate_trade(signal)
 
-            current = f"{decision}_{score}"
+            stats["equity"] += pnl
 
-            log.info(f"{decision} | {score} | {trend} | {price}")
+            if pnl > 0:
+                stats["wins"] += 1
+            elif pnl < 0:
+                stats["losses"] += 1
 
-            if current != last_signal and decision != "WAIT":
+            if stats["equity"] > stats["peak"]:
+                stats["peak"] = stats["equity"]
 
-                msg = format_signal(decision, score, price, trend)
+            stats["drawdown"] = stats["peak"] - stats["equity"]
 
-                await send(msg)
-
-                last_signal = current
+            log.info(f"{signal} | {score} | {trend} | {price} | Equity:{stats['equity']:.2f}")
 
             if time.time() - last_status > STATUS_INTERVAL:
 
-                await send(f"""
-📊 SYSTEM STATUS
-
-🟢 ONLINE
-
-🚀 SOL/USDT
-
-📈 Last Score: {score}
-📊 Trend: {trend}
-
-🧠 Level 22.6
-""")
+                await send(dashboard(score, trend))
 
                 last_status = time.time()
 
@@ -222,5 +184,6 @@ async def run():
 
         await asyncio.sleep(INTERVAL)
 
+# ================= START =================
 if __name__ == "__main__":
     asyncio.run(run())
