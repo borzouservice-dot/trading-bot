@@ -1,0 +1,17 @@
+venv/
+**pycache**/
+*.pyc
+
+*.log
+logs/
+
+paper.lock
+
+data/
+*.csv
+*.json
+
+.env
+
+.idea/
+.vscode/
