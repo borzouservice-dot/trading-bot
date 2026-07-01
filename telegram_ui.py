@@ -1,5 +1,7 @@
 import os
 import psutil
+import subprocess
+import os
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import (
@@ -90,6 +92,49 @@ async def health(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"RAM: {ram}MB"
     )
 
+async def restart(update, context):
+
+    await update.message.reply_text(
+        "♻️ Restarting TradingBot..."
+    )
+
+    subprocess.Popen(
+        [
+            "sudo",
+            "systemctl",
+            "restart",
+            "tradingbot"
+        ]
+    )
+
+
+async def stop(update, context):
+
+    await update.message.reply_text(
+        "🛑 Stopping TradingBot..."
+    )
+
+    subprocess.Popen(
+        [
+            "sudo",
+            "systemctl",
+            "stop",
+            "tradingbot"
+        ]
+    )
+app.add_handler(
+    CommandHandler(
+        "restart",
+        restart
+    )
+)
+
+app.add_handler(
+    CommandHandler(
+        "stop",
+        stop
+    )
+)
 
 app = (
     ApplicationBuilder()
