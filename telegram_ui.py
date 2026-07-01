@@ -122,7 +122,6 @@ async def stop(update, context):
             "tradingbot"
         ]
     )
-
 app = (
     ApplicationBuilder()
     .token(BOT_TOKEN)
