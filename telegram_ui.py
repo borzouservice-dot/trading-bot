@@ -122,19 +122,6 @@ async def stop(update, context):
             "tradingbot"
         ]
     )
-app.add_handler(
-    CommandHandler(
-        "restart",
-        restart
-    )
-)
-
-app.add_handler(
-    CommandHandler(
-        "stop",
-        stop
-    )
-)
 
 app = (
     ApplicationBuilder()
@@ -157,6 +144,20 @@ app.add_handler(
 app.add_handler(
     CommandHandler("health", health)
 )
+app.add_handler(
+    CommandHandler(
+        "restart",
+        restart
+    )
+)
+
+app.add_handler(
+    CommandHandler(
+        "stop",
+        stop
+    )
+)
+
 
 print("Telegram UI Started")
 
