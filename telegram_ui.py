@@ -1,8 +1,18 @@
+# ==========================================
+# TELEGRAM UI V4
+# ==========================================
+
+# ==========================================
+# IMPORTS
+# ==========================================
+
 import os
 import psutil
+import asyncio
 import subprocess
-import os
+
 from dotenv import load_dotenv
+
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -12,21 +22,34 @@ from telegram.ext import (
 
 from storage import load_state
 
+# ==========================================
+# CONFIG
+# ==========================================
+
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
+# ==========================================
+# STATUS
+# ==========================================
 
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def status(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     s = load_state()
 
     trades = s["trades"]
 
     wr = 0
+
     if trades > 0:
         wr = round(
-            s["wins"] / trades * 100,
+            s["wins"] /
+            trades *
+            100,
             1
         )
 
@@ -42,8 +65,14 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(msg)
 
+# ==========================================
+# BALANCE
+# ==========================================
 
-async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def balance(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     s = load_state()
 
@@ -51,15 +80,23 @@ async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💰 Balance: {s['balance']:.2f}"
     )
 
+# ==========================================
+# POSITIONS
+# ==========================================
 
-async def positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def positions(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     s = load_state()
 
     if not s["positions"]:
+
         await update.message.reply_text(
             "No open positions"
         )
+
         return
 
     txt = "📊 Open Positions\n\n"
@@ -74,8 +111,14 @@ async def positions(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(txt)
 
+# ==========================================
+# HEALTH
+# ==========================================
 
-async def health(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def health(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     cpu = psutil.cpu_percent()
 
@@ -92,10 +135,14 @@ async def health(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"RAM: {ram}MB"
     )
 
-async def restart(update, context):
+# ==========================================
+# RESTART BOT
+# ==========================================
 
-    import asyncio
-    import subprocess
+async def restart(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     await update.message.reply_text(
         "♻️ Restart command sent..."
@@ -137,10 +184,65 @@ async def restart(update, context):
         await update.message.reply_text(
             f"❌ Restart check error\n{e}"
         )
-async def stop(update, context):
 
-    import asyncio
-    import subprocess
+# ==========================================
+# START BOT
+# ==========================================
+
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    await update.message.reply_text(
+        "▶️ Start command sent..."
+    )
+
+    subprocess.Popen([
+        "sudo",
+        "systemctl",
+        "start",
+        "tradingbot"
+    ])
+
+    await asyncio.sleep(3)
+
+    try:
+
+        status = subprocess.check_output(
+            [
+                "systemctl",
+                "is-active",
+                "tradingbot"
+            ]
+        ).decode().strip()
+
+        if status == "active":
+
+            await update.message.reply_text(
+                "✅ TradingBot started"
+            )
+
+        else:
+
+            await update.message.reply_text(
+                f"❌ Start failed\n{status}"
+            )
+
+    except Exception as e:
+
+        await update.message.reply_text(
+            f"❌ Start check error\n{e}"
+        )
+
+# ==========================================
+# STOP BOT
+# ==========================================
+
+async def stop(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     await update.message.reply_text(
         "🛑 Stop command sent..."
@@ -183,31 +285,59 @@ async def stop(update, context):
             f"❌ Stop check error\n{e}"
         )
 
+# ==========================================
+# APP
+# ==========================================
+
 app = (
     ApplicationBuilder()
     .token(BOT_TOKEN)
     .build()
 )
 
+# ==========================================
+# HANDLERS
+# ==========================================
+
 app.add_handler(
-    CommandHandler("status", status)
+    CommandHandler(
+        "status",
+        status
+    )
 )
 
 app.add_handler(
-    CommandHandler("balance", balance)
+    CommandHandler(
+        "balance",
+        balance
+    )
 )
 
 app.add_handler(
-    CommandHandler("positions", positions)
+    CommandHandler(
+        "positions",
+        positions
+    )
 )
 
 app.add_handler(
-    CommandHandler("health", health)
+    CommandHandler(
+        "health",
+        health
+    )
 )
+
 app.add_handler(
     CommandHandler(
         "restart",
         restart
+    )
+)
+
+app.add_handler(
+    CommandHandler(
+        "start",
+        start
     )
 )
 
@@ -218,7 +348,12 @@ app.add_handler(
     )
 )
 
+# ==========================================
+# START UI
+# ==========================================
 
-print("Telegram UI Started")
+print(
+    "Telegram UI Started"
+)
 
 app.run_polling()
