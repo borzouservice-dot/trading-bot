@@ -94,34 +94,95 @@ async def health(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def restart(update, context):
 
+    import asyncio
+    import subprocess
+
     await update.message.reply_text(
-        "♻️ Restarting TradingBot..."
+        "♻️ Restart command sent..."
     )
 
-    subprocess.Popen(
-        [
-            "sudo",
-            "systemctl",
-            "restart",
-            "tradingbot"
-        ]
-    )
+    subprocess.Popen([
+        "sudo",
+        "systemctl",
+        "restart",
+        "tradingbot"
+    ])
 
+    await asyncio.sleep(3)
 
+    try:
+
+        status = subprocess.check_output(
+            [
+                "systemctl",
+                "is-active",
+                "tradingbot"
+            ]
+        ).decode().strip()
+
+        if status == "active":
+
+            await update.message.reply_text(
+                "✅ TradingBot restarted successfully"
+            )
+
+        else:
+
+            await update.message.reply_text(
+                f"❌ Restart failed\n{status}"
+            )
+
+    except Exception as e:
+
+        await update.message.reply_text(
+            f"❌ Restart check error\n{e}"
+        )
 async def stop(update, context):
 
+    import asyncio
+    import subprocess
+
     await update.message.reply_text(
-        "🛑 Stopping TradingBot..."
+        "🛑 Stop command sent..."
     )
 
-    subprocess.Popen(
-        [
-            "sudo",
-            "systemctl",
-            "stop",
-            "tradingbot"
-        ]
-    )
+    subprocess.Popen([
+        "sudo",
+        "systemctl",
+        "stop",
+        "tradingbot"
+    ])
+
+    await asyncio.sleep(3)
+
+    try:
+
+        status = subprocess.check_output(
+            [
+                "systemctl",
+                "is-active",
+                "tradingbot"
+            ]
+        ).decode().strip()
+
+        if status == "inactive":
+
+            await update.message.reply_text(
+                "✅ TradingBot stopped"
+            )
+
+        else:
+
+            await update.message.reply_text(
+                f"❌ Stop failed\n{status}"
+            )
+
+    except Exception as e:
+
+        await update.message.reply_text(
+            f"❌ Stop check error\n{e}"
+        )
+
 app = (
     ApplicationBuilder()
     .token(BOT_TOKEN)
