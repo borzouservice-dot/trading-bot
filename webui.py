@@ -120,7 +120,7 @@ def api_status():
 # START
 # ==========================================
 
-if name == "main":
+if name == "__main__":
 
     app.run(
 
