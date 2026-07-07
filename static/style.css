@@ -1,0 +1,172 @@
+/* ==========================================
+   TradingBot V4 - Dark Theme
+========================================== */
+
+body {
+    margin: 0;
+    padding: 0;
+    background: #0f172a;
+    color: #e2e8f0;
+    font-family: Arial, sans-serif;
+}
+
+.container {
+    max-width: 1200px;
+    margin: auto;
+    padding: 20px;
+}
+
+.header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+}
+
+.header h1 {
+    margin: 0;
+    color: #38bdf8;
+}
+
+.status {
+    padding: 8px 14px;
+    border-radius: 12px;
+    font-size: 14px;
+    font-weight: bold;
+}
+
+.online {
+    background: #10251b;
+    color: #4ade80;
+    border: 1px solid #166534;
+}
+
+.cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 16px;
+    margin-bottom: 20px;
+}
+
+.card {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 16px;
+    padding: 18px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+}
+
+.card h3 {
+    margin: 0 0 10px 0;
+    color: #94a3b8;
+    font-size: 14px;
+}
+
+.card p {
+    margin: 0;
+    font-size: 28px;
+    font-weight: bold;
+    color: #f8fafc;
+}
+
+.panel {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 16px;
+    padding: 18px;
+    margin-bottom: 20px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+}
+
+.panel h2 {
+    margin-top: 0;
+    color: #38bdf8;
+    font-size: 18px;
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+td {
+    padding: 10px 0;
+    border-bottom: 1px solid #334155;
+}
+
+td:last-child {
+    text-align: right;
+    font-weight: bold;
+}
+
+.buttons {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 12px;
+    margin-bottom: 20px;
+}
+
+button {
+    background: #2563eb;
+    color: white;
+    border: none;
+    border-radius: 12px;
+    padding: 14px;
+    font-size: 15px;
+    font-weight: bold;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+button:hover {
+    background: #1d4ed8;
+    transform: translateY(-1px);
+}
+
+#stopBtn {
+    background: #dc2626;
+}
+
+#stopBtn:hover {
+    background: #b91c1c;
+}
+
+#restartBtn {
+    background: #ea580c;
+}
+
+#restartBtn:hover {
+    background: #c2410c;
+}
+
+#logsBtn {
+    background: #475569;
+}
+
+#logsBtn:hover {
+    background: #334155;
+}
+
+.placeholder {
+    text-align: center;
+    padding: 32px;
+    color: #94a3b8;
+    border: 2px dashed #334155;
+    border-radius: 12px;
+}
+
+#positions {
+    line-height: 1.8;
+}
+
+@media (max-width: 768px) {
+    .header {
+        flex-direction: column;
+        gap: 12px;
+        align-items: flex-start;
+    }
+
+    .card p {
+        font-size: 24px;
+    }
+}
