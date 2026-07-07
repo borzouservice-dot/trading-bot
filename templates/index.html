@@ -1,31 +1,150 @@
+```html
 <!DOCTYPE html>
-
-<html>
+<html lang="en">
 
 <head>
 
-<title>
+    <meta charset="UTF-8">
 
-TradingBot V4
+    <meta name="viewport"
+          content="width=device-width, initial-scale=1.0">
 
-</title>
+    <title>TradingBot V4</title>
+
+    <link rel="stylesheet"
+          href="{{ url_for('static', filename='style.css') }}">
 
 </head>
 
 <body>
 
-<h1>
+<div class="container">
 
-TradingBot V4
+    <header class="header">
 
-</h1>
+        <h1>🤖 TradingBot V4</h1>
 
-<p>
+        <div class="status online">
+            ● ONLINE
+        </div>
 
-Web UI Started Successfully
+    </header>
 
-</p>
+    <section class="cards">
+
+        <div class="card">
+            <h3>💰 Balance</h3>
+            <p id="balance">--</p>
+        </div>
+
+        <div class="card">
+            <h3>📈 Session PnL</h3>
+            <p id="pnl">--</p>
+        </div>
+
+        <div class="card">
+            <h3>🎯 Win Rate</h3>
+            <p id="wr">--</p>
+        </div>
+
+        <div class="card">
+            <h3>📊 Trades</h3>
+            <p id="trades">--</p>
+        </div>
+
+    </section>
+
+    <section class="panel">
+
+        <h2>📌 Open Positions</h2>
+
+        <div id="positions">
+
+            No Open Positions
+
+        </div>
+
+    </section>
+
+    <section class="panel">
+
+        <h2>❤️ System Health</h2>
+
+        <table>
+
+            <tr>
+                <td>CPU</td>
+                <td id="cpu">--</td>
+            </tr>
+
+            <tr>
+                <td>RAM</td>
+                <td id="ram">--</td>
+            </tr>
+
+            <tr>
+                <td>Uptime</td>
+                <td id="uptime">--</td>
+            </tr>
+
+            <tr>
+                <td>Bot</td>
+                <td id="botstatus">ONLINE</td>
+            </tr>
+
+        </table>
+
+    </section>
+
+    <section class="buttons">
+
+        <button id="startBtn">
+            ▶ START
+        </button>
+
+        <button id="stopBtn">
+            ⏹ STOP
+        </button>
+
+        <button id="restartBtn">
+            🔄 RESTART
+        </button>
+
+        <button id="logsBtn">
+            📄 LOGS
+        </button>
+
+    </section>
+
+    <section class="panel">
+
+        <h2>📉 Equity Curve</h2>
+
+        <div class="placeholder">
+
+            Coming Soon
+
+        </div>
+
+    </section>
+
+    <section class="panel">
+
+        <h2>🧾 Recent Trades</h2>
+
+        <div class="placeholder">
+
+            Coming Soon
+
+        </div>
+
+    </section>
+
+</div>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
 
 </body>
 
 </html>
+```
