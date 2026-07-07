@@ -15,7 +15,7 @@ from storage import load_state
 # APP
 # ==========================================
 
-app = Flask(name)
+app = Flask(__name__)
 
 START_TIME = time.time()
 
