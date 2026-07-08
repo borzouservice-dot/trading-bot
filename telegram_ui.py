@@ -304,12 +304,5 @@ print("Telegram UI V4.2 Started")
 
 app.run_polling()
 
-# ==========================================
-# START UI
-# ==========================================
-
-print(
-    "Telegram UI Started"
-)
 
 app.run_polling()
