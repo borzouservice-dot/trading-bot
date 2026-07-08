@@ -1,17 +1,5 @@
 # ==========================================
-# TELEGRAM UI V4
-# ==========================================
-
-# ==========================================
-# IMPORTS
-# ==========================================
-
-# ==========================================
 # TELEGRAM UI V4.2
-# ==========================================
-
-# ==========================================
-# IMPORTS
 # ==========================================
 
 import os
@@ -26,7 +14,6 @@ from telegram.ext import (
 )
 
 from storage import load_state
-
 from controller import (
     start_bot,
     stop_bot,
@@ -43,6 +30,19 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN not found in .env")
+
+# ==========================================
+# APP
+# ==========================================
+
+app = (
+    ApplicationBuilder()
+    .token(BOT_TOKEN)
+    .build()
+)
+
 # ==========================================
 # STATUS
 # ==========================================
@@ -54,29 +54,26 @@ async def status(
 
     s = load_state()
 
-    trades = s["trades"]
+    trades = s.get("trades", 0)
+    wins = s.get("wins", 0)
+    losses = s.get("losses", 0)
 
     wr = 0
+    if trades:
+        wr = round((wins / trades) * 100, 1)
 
-    if trades > 0:
-        wr = round(
-            s["wins"] /
-            trades *
-            100,
-            1
-        )
-
-    msg = (
+    text = (
         "🤖 TradingBot V4\n\n"
-        f"Balance: {s['balance']:.2f}\n"
-        f"Trades: {trades}\n"
-        f"Wins: {s['wins']}\n"
-        f"Losses: {s['losses']}\n"
-        f"WR: {wr}%\n"
-        f"Open: {len(s['positions'])}"
+        f"💰 Balance : {s.get('balance',0):.2f}\n"
+        f"📈 Trades  : {trades}\n"
+        f"✅ Wins    : {wins}\n"
+        f"❌ Losses  : {losses}\n"
+        f"🎯 WR      : {wr}%\n"
+        f"📌 Open    : {len(s.get('positions', {}))}"
     )
 
-    await update.message.reply_text(msg)
+    await update.message.reply_text(text)
+
 
 # ==========================================
 # BALANCE
@@ -90,8 +87,9 @@ async def balance(
     s = load_state()
 
     await update.message.reply_text(
-        f"💰 Balance: {s['balance']:.2f}"
+        f"💰 Balance : {s.get('balance',0):.2f}"
     )
+
 
 # ==========================================
 # POSITIONS
@@ -104,25 +102,26 @@ async def positions(
 
     s = load_state()
 
-    if not s["positions"]:
+    pos = s.get("positions", {})
 
+    if not pos:
         await update.message.reply_text(
-            "No open positions"
+            "📭 No Open Positions"
         )
-
         return
 
-    txt = "📊 Open Positions\n\n"
+    msg = "📊 Open Positions\n\n"
 
-    for sym, p in s["positions"].items():
+    for symbol, p in pos.items():
 
-        txt += (
-            f"{sym}\n"
-            f"{p['side']}\n"
+        msg += (
+            f"{symbol}\n"
+            f"Side : {p['side']}\n"
             f"Entry: {p['entry']}\n\n"
         )
 
-    await update.message.reply_text(txt)
+    await update.message.reply_text(msg)
+
 
 # ==========================================
 # HEALTH
@@ -136,17 +135,18 @@ async def health(
     cpu = psutil.cpu_percent()
 
     ram = int(
-        psutil.Process()
-        .memory_info()
-        .rss
-        / 1024 / 1024
+        psutil.Process().memory_info().rss
+        / 1024
+        / 1024
     )
 
     await update.message.reply_text(
-        f"❤️ HEALTH\n"
-        f"CPU: {cpu}%\n"
-        f"RAM: {ram}MB"
+
+        f"❤️ System Health\n\n"
+        f"CPU : {cpu}%\n"
+        f"RAM : {ram} MB"
     )
+
 # ==========================================
 # LOGS
 # ==========================================
@@ -158,12 +158,10 @@ async def logs(
 
     text = logs_bot(30)
 
-    if not text.strip():
-
-        text = "No logs available."
+    if not text:
+        text = "No logs."
 
     if len(text) > 3900:
-
         text = text[-3900:]
 
     await update.message.reply_text(
@@ -171,7 +169,7 @@ async def logs(
     )
 
 # ==========================================
-# SERVICE STATUS
+# SERVICE
 # ==========================================
 
 async def service(
@@ -187,35 +185,11 @@ async def service(
         icon = "🔴"
 
     await update.message.reply_text(
-        f"{icon} Service Status\n\n{state.upper()}"
+        f"{icon} TradingBot Service\n\nStatus : {state}"
     )
 
 # ==========================================
-# RESTART BOT
-# ==========================================
-
-async def restart(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    await update.message.reply_text(
-        "♻️ Restarting TradingBot..."
-    )
-
-    ok = restart_bot()
-
-    if ok:
-        await update.message.reply_text(
-            "✅ TradingBot restarted successfully"
-        )
-    else:
-        await update.message.reply_text(
-            "❌ Restart failed"
-        )
-
-# ==========================================
-# START BOT
+# START
 # ==========================================
 
 async def start(
@@ -223,23 +197,19 @@ async def start(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    await update.message.reply_text(
-        "▶️ Starting TradingBot..."
-    )
-
     ok = start_bot()
 
     if ok:
         await update.message.reply_text(
-            "✅ TradingBot started"
+            "✅ TradingBot Started"
         )
     else:
         await update.message.reply_text(
-            "❌ Start failed"
+            "❌ Failed To Start"
         )
 
 # ==========================================
-# STOP BOT
+# STOP
 # ==========================================
 
 async def stop(
@@ -247,62 +217,61 @@ async def stop(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    await update.message.reply_text(
-        "🛑 Stopping TradingBot..."
-    )
-
     ok = stop_bot()
 
     if ok:
         await update.message.reply_text(
-            "✅ TradingBot stopped"
+            "🛑 TradingBot Stopped"
         )
     else:
         await update.message.reply_text(
-            "❌ Stop failed"
+            "❌ Failed To Stop"
         )
 
-  
-
 # ==========================================
-# APP
+# RESTART
 # ==========================================
 
-app = (
-    ApplicationBuilder()
-    .token(BOT_TOKEN)
-    .build()
-)
+async def restart(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    ok = restart_bot()
+
+    if ok:
+        await update.message.reply_text(
+            "♻️ TradingBot Restarted"
+        )
+    else:
+        await update.message.reply_text(
+            "❌ Restart Failed"
+        )
 
 # ==========================================
 # HANDLERS
 # ==========================================
 
 app.add_handler(CommandHandler("status", status))
-
 app.add_handler(CommandHandler("service", service))
-
 app.add_handler(CommandHandler("balance", balance))
-
 app.add_handler(CommandHandler("positions", positions))
-
 app.add_handler(CommandHandler("health", health))
-
 app.add_handler(CommandHandler("logs", logs))
-
 app.add_handler(CommandHandler("start", start))
-
 app.add_handler(CommandHandler("stop", stop))
-
 app.add_handler(CommandHandler("restart", restart))
 
 # ==========================================
-# START UI
+# MAIN
 # ==========================================
 
-print("Telegram UI V4.2 Started")
+if __name__ == "__main__":
 
-app.run_polling()
+    print("🤖 Telegram UI V4.2 Started")
 
+    app.run_polling(
+        drop_pending_updates=True,
+        allowed_updates=Update.ALL_TYPES,
+    )
 
-app.run_polling()
