@@ -6,11 +6,16 @@
 # IMPORTS
 # ==========================================
 
+# ==========================================
+# TELEGRAM UI V4.2
+# ==========================================
+
+# ==========================================
+# IMPORTS
+# ==========================================
+
 import os
 import psutil
-import asyncio
-import subprocess
-
 from dotenv import load_dotenv
 
 from telegram import Update
@@ -21,6 +26,14 @@ from telegram.ext import (
 )
 
 from storage import load_state
+
+from controller import (
+    start_bot,
+    stop_bot,
+    restart_bot,
+    status_bot,
+    logs_bot,
+)
 
 # ==========================================
 # CONFIG
@@ -134,6 +147,48 @@ async def health(
         f"CPU: {cpu}%\n"
         f"RAM: {ram}MB"
     )
+# ==========================================
+# LOGS
+# ==========================================
+
+async def logs(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    text = logs_bot(30)
+
+    if not text.strip():
+
+        text = "No logs available."
+
+    if len(text) > 3900:
+
+        text = text[-3900:]
+
+    await update.message.reply_text(
+        f"📄 Last Logs\n\n{text}"
+    )
+
+# ==========================================
+# SERVICE STATUS
+# ==========================================
+
+async def service(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    state = status_bot()
+
+    icon = "🟢"
+
+    if state != "active":
+        icon = "🔴"
+
+    await update.message.reply_text(
+        f"{icon} Service Status\n\n{state.upper()}"
+    )
 
 # ==========================================
 # RESTART BOT
@@ -145,44 +200,18 @@ async def restart(
 ):
 
     await update.message.reply_text(
-        "♻️ Restart command sent..."
+        "♻️ Restarting TradingBot..."
     )
 
-    subprocess.Popen([
-        "sudo",
-        "systemctl",
-        "restart",
-        "tradingbot"
-    ])
+    ok = restart_bot()
 
-    await asyncio.sleep(3)
-
-    try:
-
-        status = subprocess.check_output(
-            [
-                "systemctl",
-                "is-active",
-                "tradingbot"
-            ]
-        ).decode().strip()
-
-        if status == "active":
-
-            await update.message.reply_text(
-                "✅ TradingBot restarted successfully"
-            )
-
-        else:
-
-            await update.message.reply_text(
-                f"❌ Restart failed\n{status}"
-            )
-
-    except Exception as e:
-
+    if ok:
         await update.message.reply_text(
-            f"❌ Restart check error\n{e}"
+            "✅ TradingBot restarted successfully"
+        )
+    else:
+        await update.message.reply_text(
+            "❌ Restart failed"
         )
 
 # ==========================================
@@ -195,44 +224,18 @@ async def start(
 ):
 
     await update.message.reply_text(
-        "▶️ Start command sent..."
+        "▶️ Starting TradingBot..."
     )
 
-    subprocess.Popen([
-        "sudo",
-        "systemctl",
-        "start",
-        "tradingbot"
-    ])
+    ok = start_bot()
 
-    await asyncio.sleep(3)
-
-    try:
-
-        status = subprocess.check_output(
-            [
-                "systemctl",
-                "is-active",
-                "tradingbot"
-            ]
-        ).decode().strip()
-
-        if status == "active":
-
-            await update.message.reply_text(
-                "✅ TradingBot started"
-            )
-
-        else:
-
-            await update.message.reply_text(
-                f"❌ Start failed\n{status}"
-            )
-
-    except Exception as e:
-
+    if ok:
         await update.message.reply_text(
-            f"❌ Start check error\n{e}"
+            "✅ TradingBot started"
+        )
+    else:
+        await update.message.reply_text(
+            "❌ Start failed"
         )
 
 # ==========================================
@@ -245,45 +248,21 @@ async def stop(
 ):
 
     await update.message.reply_text(
-        "🛑 Stop command sent..."
+        "🛑 Stopping TradingBot..."
     )
 
-    subprocess.Popen([
-        "sudo",
-        "systemctl",
-        "stop",
-        "tradingbot"
-    ])
+    ok = stop_bot()
 
-    await asyncio.sleep(3)
-
-    try:
-
-        status = subprocess.check_output(
-            [
-                "systemctl",
-                "is-active",
-                "tradingbot"
-            ]
-        ).decode().strip()
-
-        if status == "inactive":
-
-            await update.message.reply_text(
-                "✅ TradingBot stopped"
-            )
-
-        else:
-
-            await update.message.reply_text(
-                f"❌ Stop failed\n{status}"
-            )
-
-    except Exception as e:
-
+    if ok:
         await update.message.reply_text(
-            f"❌ Stop check error\n{e}"
+            "✅ TradingBot stopped"
         )
+    else:
+        await update.message.reply_text(
+            "❌ Stop failed"
+        )
+
+  
 
 # ==========================================
 # APP
@@ -299,54 +278,31 @@ app = (
 # HANDLERS
 # ==========================================
 
-app.add_handler(
-    CommandHandler(
-        "status",
-        status
-    )
-)
+app.add_handler(CommandHandler("status", status))
 
-app.add_handler(
-    CommandHandler(
-        "balance",
-        balance
-    )
-)
+app.add_handler(CommandHandler("service", service))
 
-app.add_handler(
-    CommandHandler(
-        "positions",
-        positions
-    )
-)
+app.add_handler(CommandHandler("balance", balance))
 
-app.add_handler(
-    CommandHandler(
-        "health",
-        health
-    )
-)
+app.add_handler(CommandHandler("positions", positions))
 
-app.add_handler(
-    CommandHandler(
-        "restart",
-        restart
-    )
-)
+app.add_handler(CommandHandler("health", health))
 
-app.add_handler(
-    CommandHandler(
-        "start",
-        start
-    )
-)
+app.add_handler(CommandHandler("logs", logs))
 
-app.add_handler(
-    CommandHandler(
-        "stop",
-        stop
-    )
-)
+app.add_handler(CommandHandler("start", start))
+
+app.add_handler(CommandHandler("stop", stop))
+
+app.add_handler(CommandHandler("restart", restart))
+
+# ==========================================
+# START UI
+# ==========================================
+
+print("Telegram UI V4.2 Started")
+
+app.run_polling()
 
 # ==========================================
 # START UI
